@@ -54,11 +54,16 @@ final class SpotifyClient: NSObject, Transport {
     private var runProgressed = false
     private var stopped = false
     /// The last play request, kept until the device reports a loaded track.
-    private var pendingStart: (body: [String: Any], since: Date, retried: Bool)?
+    /// `previous` is the track that was playing before, which doesn't count as a successful start.
+    private var pendingStart: (body: [String: Any], since: Date, retried: Bool, previous: String?)?
+    /// Some Spotify clients ignore plain track lists; then tracks are started inside their album.
+    private var useAlbumContext = false
 
     var isConnected: Bool { Keychain.read(Self.refreshTokenAccount) != nil }
     /// False when Spotify plays a whole playlist on its own instead of tracks from MacAmp's playlist.
     var isFollowingRun: Bool { !run.isEmpty }
+    /// True when Spotify plays a track MacAmp handed over (otherwise the windows show Spotify's own track).
+    var isPlayingRunItem: Bool { playback?.item.map { run.contains($0.uri) } ?? false }
 
     // MARK: Transport
 
@@ -134,10 +139,25 @@ final class SpotifyClient: NSObject, Transport {
 
     /// Plays `uris` in order on the user's Spotify device and starts following its state.
     func play(uris: [String]) async throws {
-        run = uris
         runProgressed = false
         pendingStart = nil
-        try await start(["uris": uris])
+        if useAlbumContext, let first = uris.first {
+            run = [first]
+            try await start(try await albumContext(for: first))
+        } else {
+            run = uris
+            try await start(["uris": uris])
+        }
+    }
+
+    /// `{"context_uri": <album>, "offset": {"uri": <track>}}` for a track URI.
+    private func albumContext(for trackURI: String) async throws -> [String: Any] {
+        let id = trackURI.split(separator: ":").last.map(String.init) ?? trackURI
+        let (data, _) = try await request("GET", "/tracks/\(id)")
+        guard let album = try JSONDecoder.spotify.decode(SpotifyTrack.self, from: data).album?.uri else {
+            return ["uris": [trackURI]]
+        }
+        return ["context_uri": album, "offset": ["uri": trackURI]]
     }
 
     /// Plays a whole Spotify playlist (e.g. one the API won't list tracks for); Spotify drives the order.
@@ -155,14 +175,15 @@ final class SpotifyClient: NSObject, Transport {
         _ = try await request("PUT", "/me/player/play", query: ["device_id": device],
                               body: try JSONSerialization.data(withJSONObject: body))
         deviceID = device
-        pendingStart = (body, Date(), pendingStart?.retried ?? false)
+        pendingStart = (body, Date(), pendingStart?.retried ?? false, pendingStart?.previous ?? playback?.item?.uri)
         activate()
     }
 
     /// Retries a start once if the device still has no track after three seconds.
     private func checkPendingStart(_ state: SpotifyPlayback) {
         guard let pending = pendingStart else { return }
-        if state.item != nil {
+        // Right after the request Spotify may still report the previous track; only the requested one counts.
+        if let uri = state.item?.uri, run.isEmpty ? uri != pending.previous : run.contains(uri) {
             pendingStart = nil
             return
         }
@@ -173,7 +194,14 @@ final class SpotifyClient: NSObject, Transport {
             return
         }
         pendingStart?.retried = true
-        Task { try? await start(pending.body, transfer: true) }
+        // A track list the device ignored is retried as album context, which it does honor.
+        if pending.body["uris"] != nil, let first = run.first {
+            useAlbumContext = true
+            run = [first]
+            Task { try? await start(try await albumContext(for: first)) }
+        } else {
+            Task { try? await start(pending.body, transfer: true) }
+        }
     }
 
     func skip(forward: Bool) {
@@ -263,18 +291,29 @@ final class SpotifyClient: NSObject, Transport {
 
     // MARK: Library data
 
-    func likedSongs() async throws -> [LibraryTrack] {
-        try await pages("/me/tracks", limit: 50, maxPages: 20, as: SpotifyItemEntry.self).compactMap(\.content?.libraryTrack)
+    /// `progress` receives the tracks loaded so far and the total count after every page.
+    typealias Progress = ([LibraryTrack], Int?) -> Void
+
+    func likedSongs(progress: Progress? = nil) async throws -> [LibraryTrack] {
+        try await trackPages("/me/tracks", limit: 50, progress: progress)
     }
 
     func playlists() async throws -> [SpotifyPlaylist] {
         try await pages("/me/playlists", limit: 50, maxPages: 10, as: SpotifyPlaylist.self)
     }
 
-    func tracks(ofPlaylist id: String) async throws -> [LibraryTrack] {
+    func tracks(ofPlaylist id: String, progress: Progress? = nil) async throws -> [LibraryTrack] {
         // Since February 2026 only playlists the user owns or collaborates on list their items (others: 403).
-        try await pages("/playlists/\(id)/items", limit: 100, maxPages: 20, as: SpotifyItemEntry.self)
-            .compactMap(\.content?.libraryTrack)
+        try await trackPages("/playlists/\(id)/items", limit: 100, progress: progress)
+    }
+
+    private func trackPages(_ path: String, limit: Int, progress: Progress?) async throws -> [LibraryTrack] {
+        var tracks: [LibraryTrack] = []
+        try await pages(path, limit: limit, maxPages: 20, as: SpotifyItemEntry.self) { items, total in
+            tracks += items.compactMap(\.content?.libraryTrack)
+            progress?(tracks, total)
+        }
+        return tracks
     }
 
     /// The first 20 matches; development-mode apps may request at most 10 per page.
@@ -291,12 +330,16 @@ final class SpotifyClient: NSObject, Transport {
     }
 
     // ponytail: fixed page caps (1,000 liked songs / 2,000 playlist tracks); follow `next` fully if users hit them.
-    private func pages<Item: Decodable & Sendable>(_ path: String, limit: Int, maxPages: Int, as: Item.Type) async throws -> [Item] {
+    @discardableResult
+    private func pages<Item: Decodable & Sendable>(_ path: String, limit: Int, maxPages: Int, as: Item.Type,
+                                                    onPage: (([Item], Int?) -> Void)? = nil) async throws -> [Item] {
         var items: [Item] = []
         for page in 0..<maxPages {
+            try Task.checkCancellation()
             let (data, _) = try await request("GET", path, query: ["limit": String(limit), "offset": String(page * limit)])
             let result = try JSONDecoder.spotify.decode(SpotifyPage<Item>.self, from: data)
             items += result.items
+            onPage?(result.items, result.total)
             if result.next == nil { break }
         }
         return items

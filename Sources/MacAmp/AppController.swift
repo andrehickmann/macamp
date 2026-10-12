@@ -17,6 +17,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     /// The source the windows control.
     var transport: any Transport { spotify.isActive ? spotify : player }
     private(set) var spotifyPlaylists: [SpotifyPlaylist] = []
+    /// Spotify tracks seen in the library, so dropped `spotify:` URLs get a title and length.
+    private var spotifyTracks: [URL: LibraryTrack] = [:]
     /// Playlist index of the first track of the run handed to Spotify.
     private var spotifyRunStart = 0
     private(set) var skin: Skin!
@@ -215,7 +217,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     /// "1. Artist - Title (3:45)" as shown in the main window; streams show no length.
     var marqueeText: String {
-        if spotify.isActive, !spotify.isFollowingRun, let item = spotify.playback?.item?.libraryTrack {
+        if spotify.isActive, !spotify.isPlayingRunItem, let item = spotify.playback?.item?.libraryTrack {
             return "\(item.displayTitle) (\(TimeDisplay.string(seconds: item.duration ?? 0)))"
         }
         guard let current = playlist.current, playlist.entries.indices.contains(current) else { return "MACAMP" }
@@ -357,8 +359,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         refreshViews()
     }
 
+    func rememberSpotifyTracks(_ tracks: [LibraryTrack]) {
+        for track in tracks { spotifyTracks[track.url] = track }
+    }
+
     private func expand(_ urls: [URL]) -> [PlaylistEntry] {
         urls.flatMap { url -> [PlaylistEntry] in
+            if url.scheme == "spotify" {
+                let track = spotifyTracks[url]
+                return [PlaylistEntry(url: url, title: track?.displayTitle, duration: track?.duration)]
+            }
             let fileExtension = url.pathExtension.lowercased()
             if ["m3u", "m3u8", "pls"].contains(fileExtension) {
                 let text = (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1)) ?? ""

@@ -58,6 +58,7 @@ public struct SpotifyArtist: Decodable, Sendable {
 
 public struct SpotifyAlbum: Decodable, Sendable {
     public var name: String
+    public var uri: String?
     public var releaseDate: String?
 }
 
@@ -103,6 +104,7 @@ public struct SpotifyPlayback: Decodable, Sendable {
 public struct SpotifyPage<Item: Decodable & Sendable>: Decodable, Sendable {
     public var items: [Item]
     public var next: String?
+    public var total: Int?
 }
 
 /// Entry of a saved-tracks or playlist-items page; newer responses name the field `item`.

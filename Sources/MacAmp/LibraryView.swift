@@ -3,7 +3,7 @@ import MacAmpCore
 
 /// The media library: a gen.bmp window frame around native lists colored like the skin's playlist.
 @MainActor
-final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
+final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     private enum SidebarItem: Hashable {
         case header(String)
         case view(Library.View)
@@ -33,6 +33,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     private let tracksTable = NSTableView()
     private let search = NSSearchField()
     private let status = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
     private var sidebarItems: [SidebarItem] = []
     private var selected = SidebarItem.view(.audio)
     private var rows: [LibraryTrack] = []
@@ -96,6 +97,9 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
         search.action = #selector(searchChanged)
         status.alignment = .right
         status.lineBreakMode = .byTruncatingHead
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
         let tracksScroll = scrollView(for: tracksTable, width: 400)
         let buttons = [("Play", #selector(playSelection)), ("Enqueue", #selector(enqueueSelection)),
                        ("Add Folder…", #selector(addFolder)), ("Rescan", #selector(rescan))].map { title, action in
@@ -105,10 +109,11 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
             button.font = .systemFont(ofSize: 11)
             return button
         }
-        for view in [search, status, tracksScroll] + buttons { pane.addSubview(view) }
-        pane.layoutSubviews = { [search, status] size in
+        for view in [search, status, spinner, tracksScroll] + buttons { pane.addSubview(view) }
+        pane.layoutSubviews = { [search, status, spinner] size in
             search.frame = CGRect(x: 4, y: size.height - 25, width: min(200, size.width - 8), height: 22)
-            status.frame = CGRect(x: 212, y: size.height - 21, width: max(0, size.width - 216), height: 16)
+            spinner.frame = CGRect(x: 210, y: size.height - 22, width: 16, height: 16)
+            status.frame = CGRect(x: 230, y: size.height - 21, width: max(0, size.width - 234), height: 16)
             tracksScroll.frame = CGRect(x: 0, y: 28, width: size.width, height: max(0, size.height - 56))
             let widths: [CGFloat] = [64, 80, 100, 64]
             let xs: [CGFloat] = [4, 72, size.width - 172, size.width - 68]
@@ -215,17 +220,29 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
         tracksTable.reloadData()
         spotifyTask?.cancel()
         guard item != .spotifySearch || !query.trimmingCharacters(in: .whitespaces).isEmpty else { return updateStatus() }
-        status.stringValue = "Loading from Spotify…"
+        let name = sidebarTitle(item)
+        status.stringValue = "Loading \(name)…"
+        spinner.startAnimation(nil)
         spotifyTask = Task {
+            defer { if !Task.isCancelled { spinner.stopAnimation(nil) } }
             if item == .spotifySearch { try? await Task.sleep(for: .milliseconds(400)) }
             guard !Task.isCancelled else { return }
+            // Each loaded page is shown right away so long playlists fill in progressively.
+            let progress: SpotifyClient.Progress = { loaded, total in
+                guard !Task.isCancelled, self.selected == item else { return }
+                self.app.rememberSpotifyTracks(loaded)
+                self.rows = self.sorted(Library.filter(loaded, query: self.search.stringValue))
+                self.tracksTable.reloadData()
+                self.status.stringValue = "Loading \(name)… \(loaded.count)" + (total.map { " of \($0)" } ?? "")
+            }
             do {
                 let tracks: [LibraryTrack] = switch item {
-                case .spotifyLiked: try await app.spotify.likedSongs()
+                case .spotifyLiked: try await app.spotify.likedSongs(progress: progress)
                 case .spotifySearch: try await app.spotify.search(query)
-                case .spotifyPlaylist(let id): try await app.spotify.tracks(ofPlaylist: id)
+                case .spotifyPlaylist(let id): try await app.spotify.tracks(ofPlaylist: id, progress: progress)
                 default: []
                 }
+                app.rememberSpotifyTracks(tracks)
                 guard !Task.isCancelled, selected == item else { return }
                 if item != .spotifySearch { spotifyRows[item] = tracks }
                 rows = sorted(item == .spotifySearch ? tracks : Library.filter(tracks, query: search.stringValue))
@@ -251,8 +268,18 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
             text = "Spotify only lists tracks of your own playlists – Play starts it in Spotify"
         }
         if let scan = app.libraryScanStatus { text += "  –  \(scan)" }
+        if app.libraryScanStatus != nil { spinner.startAnimation(nil) } else if spotifyTask == nil { spinner.stopAnimation(nil) }
         status.stringValue = text
         status.textColor = NSColor(cgColor: skin.playlistStyle.normal) ?? .green
+    }
+
+    private func sidebarTitle(_ item: SidebarItem) -> String {
+        switch item {
+        case .spotifyLiked: "Liked Songs"
+        case .spotifySearch: "search results"
+        case .spotifyPlaylist(let id): app.spotifyPlaylists.first { $0.id == id }?.name ?? "playlist"
+        default: "library"
+        }
     }
 
     private func sorted(_ tracks: [LibraryTrack]) -> [LibraryTrack] {
@@ -396,8 +423,12 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
         app.deleteLibraryPlaylist(at: index)
     }
 
+    /// Tag of menu items that only apply to local files (rating, Finder, removal).
+    private static let localOnlyTag = 1
+
     private func tracksMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
         for (title, action) in [("Play", #selector(playSelection)), ("Enqueue", #selector(enqueueSelection))] {
             menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
@@ -409,11 +440,19 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
             item.tag = stars
             item.target = self
         }
-        menu.addItem(withTitle: "Rate", action: nil, keyEquivalent: "").submenu = ratings
+        let rate = menu.addItem(withTitle: "Rate", action: nil, keyEquivalent: "")
+        rate.submenu = ratings
         menu.addItem(.separator())
         menu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Library", action: #selector(removeFromLibrary), keyEquivalent: "").target = self
+        for item in menu.items.dropFirst(2) { item.tag = Self.localOnlyTag }
         return menu
+    }
+
+    /// Hides the local-file actions when the clicked rows are Spotify tracks.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let hasFiles = targetTracks.contains { $0.url.isFileURL }
+        for item in menu.items where item.tag == Self.localOnlyTag { item.isHidden = !hasFiles }
     }
 
     private func sidebarMenu() -> NSMenu {

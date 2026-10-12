@@ -17,7 +17,8 @@ class SkinView: NSView {
     init(app: AppController) {
         self.app = app
         super.init(frame: .zero)
-        registerForDraggedTypes([.fileURL])
+        // Files and folders, plus spotify: URLs dragged from the media library.
+        registerForDraggedTypes([.fileURL, .URL])
     }
 
     @available(*, unavailable)
