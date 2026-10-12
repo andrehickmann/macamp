@@ -669,14 +669,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
     }
 
-    private func loadSpotifyPlaylists() {
+    private var isLoadingSpotifyPlaylists = false
+
+    func loadSpotifyPlaylists() {
+        guard spotify.isConnected, !isLoadingSpotifyPlaylists else { return }
+        isLoadingSpotifyPlaylists = true
         Task {
+            defer { isLoadingSpotifyPlaylists = false }
             do {
                 spotifyPlaylists = try await spotify.playlists()
+                libraryView?.libraryChanged()
             } catch {
                 NSLog("MacAmp: loading Spotify playlists failed: \(error.localizedDescription)")
+                libraryView?.showStatus("Spotify playlists: \(error.localizedDescription)")
             }
-            libraryView?.libraryChanged()
         }
     }
 

@@ -23,7 +23,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
 
     private static let title = "MEDIA LIBRARY"
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
-        ("artist", "Artist", 130), ("title", "Title", 170), ("album", "Album", 130), ("length", "Length", 50),
+        ("position", "#", 34), ("artist", "Artist", 130), ("title", "Title", 170), ("album", "Album", 130), ("length", "Length", 50),
         ("track", "Track", 44), ("genre", "Genre", 80), ("year", "Year", 40), ("rating", "Rating", 55),
         ("plays", "Plays", 40), ("lastPlayed", "Last Played", 110),
     ]
@@ -80,7 +80,8 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
             let tableColumn = NSTableColumn(identifier: .init(column.id))
             tableColumn.title = column.title
             tableColumn.width = column.width
-            tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.id, ascending: true)
+            // The running number follows the displayed order, so sorting by it means nothing.
+            if column.id != "position" { tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.id, ascending: true) }
             if column.id == "track" { tableColumn.headerToolTip = "Track number on the album" }
             tracksTable.addTableColumn(tableColumn)
         }
@@ -206,6 +207,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
 
     /// Shows cached Spotify rows (filtered by the search field) or fetches them; "Search" queries Spotify itself.
     private func loadSpotifyRows(_ item: SidebarItem) {
+        if app.spotifyPlaylists.isEmpty { app.loadSpotifyPlaylists() }
         let query = search.stringValue
         if case .spotifyPlaylist(let id) = item, closedPlaylists.contains(id) {
             rows = []
@@ -258,6 +260,11 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
                 status.stringValue = "Spotify: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Shows a one-off message in the status line (e.g. a failed request).
+    func showStatus(_ message: String) {
+        status.stringValue = message
     }
 
     func updateStatus() {
@@ -369,9 +376,9 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
             }
         } else {
             let track = rows[row]
-            cell.stringValue = Self.text(track, key: identifier.rawValue)
+            cell.stringValue = identifier.rawValue == "position" ? String(row + 1) : Self.text(track, key: identifier.rawValue)
             if app.isCurrent(track.url) { cell.textColor = NSColor(cgColor: style.current) ?? .white }
-            cell.alignment = ["length", "track", "year", "plays"].contains(identifier.rawValue) ? .right : .left
+            cell.alignment = ["position", "length", "track", "year", "plays"].contains(identifier.rawValue) ? .right : .left
         }
         return cell
     }
