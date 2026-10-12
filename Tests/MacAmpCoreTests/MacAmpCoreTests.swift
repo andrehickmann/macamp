@@ -101,3 +101,62 @@ import Testing
     let loose = CGRect(x: 600, y: 152, width: 275, height: 116)
     #expect(WindowSnapping.docked(to: 0, in: [main, equalizer, playlist, loose]) == [0, 1, 2])
 }
+
+@Test func icyDemuxerStripsMetadataAcrossChunkBoundaries() {
+    let title = Array("StreamTitle='Artist - Song';".utf8)
+    let padded = title + Array(repeating: 0, count: 32 - title.count)
+    let stream: [UInt8] = [1, 2, 3, 4] + [2] + padded + [5, 6, 7, 8] + [0] + [9, 10]
+    var demuxer = IcyDemuxer(metaInterval: 4)
+    var audio: [UInt8] = []
+    var titles: [String] = []
+    for chunk in stride(from: 0, to: stream.count, by: 7).map({ stream[$0..<min($0 + 7, stream.count)] }) {
+        let result = demuxer.consume(chunk)
+        audio += result.audio
+        titles += result.titles
+    }
+    #expect(audio == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    #expect(titles == ["Artist - Song"])
+}
+
+@Test func genFontFindsLetterRunsBetweenSeparatorColumns() throws {
+    let context = try #require(CGContext(data: nil, width: 40, height: 100, bitsPerComponent: 8, bytesPerRow: 160,
+                                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                         bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+    context.setFillColor(CGColor(srgbRed: 0, green: 0.78, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: 40, height: 100))
+    context.setFillColor(CGColor(srgbRed: 0.2, green: 0.2, blue: 0.3, alpha: 1))
+    // CoreGraphics' y axis points up: the font row at image y 88...94 is context y 5...11.
+    context.fill(CGRect(x: 1, y: 5, width: 4, height: 7))
+    context.fill(CGRect(x: 6, y: 5, width: 3, height: 7))
+    let font = Skin.parseGenFont(try #require(context.makeImage()))
+    #expect(font["A"] == CGRect(x: 1, y: 88, width: 4, height: 7))
+    #expect(font["B"] == CGRect(x: 6, y: 88, width: 3, height: 7))
+    #expect(font["C"] == nil)
+}
+
+@Test func libraryViewsFilterAndMergeKeepsStatistics() {
+    let now = Date(timeIntervalSince1970: 1_000_000_000)
+    var a = LibraryTrack(url: URL(fileURLWithPath: "/music/a.mp3"), dateAdded: now.addingTimeInterval(-90 * 86400))
+    a.title = "Señorita"
+    a.artist = "Café Band"
+    var b = LibraryTrack(url: URL(fileURLWithPath: "/music/b.mp3"), dateAdded: now)
+    b.title = "Other"
+    var library = Library()
+    library.tracks = [a, b]
+    library.recordPlay(of: a.url, at: now)
+    library.tracks[0].rating = 5
+
+    #expect(library.tracks(in: .audio, matching: "senorita cafe").map(\.url) == [a.url])
+    #expect(library.tracks(in: .mostPlayed).map(\.url) == [a.url])
+    #expect(library.tracks(in: .neverPlayed).map(\.url) == [b.url])
+    #expect(library.tracks(in: .recentlyAdded, now: now).map(\.url) == [b.url])
+    #expect(library.tracks(in: .topRated).map(\.url) == [a.url])
+
+    var rescanned = LibraryTrack(url: a.url, dateAdded: now)
+    rescanned.title = "Señorita (Remastered)"
+    library.merge([rescanned], present: [a.url], scannedFolders: [URL(fileURLWithPath: "/music")])
+    #expect(library.tracks.map(\.url) == [a.url])
+    #expect(library.tracks[0].title == "Señorita (Remastered)")
+    #expect(library.tracks[0].playCount == 1 && library.tracks[0].rating == 5)
+    #expect(library.tracks[0].dateAdded == a.dateAdded)
+}

@@ -16,6 +16,8 @@ public struct Skin {
     /// Window shapes from region.txt, keyed by lowercased section ("normal", "windowshade", "equalizer", "equalizerws").
     public let regions: [String: [[CGPoint]]]
     public let playlistStyle: PlaylistStyle
+    /// Glyphs of the variable-width title font in gen.bmp (active row; the inactive row is 8 px below).
+    public let genFont: [Character: CGRect]
 
     /// Loads a skin from an unpacked directory or a `.wsz`/`.zip` archive.
     public init(contentsOf url: URL) throws {
@@ -47,6 +49,37 @@ public struct Skin {
         func text(_ name: String) -> String? { files[name].flatMap { try? String(contentsOf: $0, encoding: .isoLatin1) } }
         regions = text("region.txt").map(Self.parseRegions) ?? [:]
         playlistStyle = text("pledit.txt").map(PlaylistStyle.init(pledit:)) ?? PlaylistStyle(pledit: "")
+        genFont = sheets["gen"].map(Self.parseGenFont) ?? [:]
+    }
+
+    /// Finds the letters A–Z in gen.bmp's font row (y = 88): glyphs are runs of columns
+    /// that differ from the separator color, which is sampled at (25, 0).
+    static func parseGenFont(_ image: CGImage) -> [Character: CGRect] {
+        let width = image.width, height = image.height
+        guard width > 25, height >= 95,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let data = context.data else { return [:] }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixels = data.bindMemory(to: UInt32.self, capacity: width * height)
+        // The context's memory starts with the top row, matching gen.bmp's coordinates.
+        func pixel(_ x: Int, _ y: Int) -> UInt32 { pixels[y * width + x] }
+        let separator = pixel(25, 0)
+
+        var font: [Character: CGRect] = [:]
+        var letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ").makeIterator()
+        var start: Int?
+        for x in 0...width {
+            let isGlyph = x < width && pixel(x, 88) != separator
+            if isGlyph, start == nil { start = x }
+            if !isGlyph, let begin = start {
+                guard let letter = letters.next() else { break }
+                font[letter] = CGRect(x: begin, y: 88, width: x - begin, height: 7)
+                start = nil
+            }
+        }
+        return font
     }
 
     /// Parses `[Section]` blocks with `NumPoints=4,4` and `PointList=x,y x,y ...` into polygons.

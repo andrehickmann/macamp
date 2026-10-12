@@ -1,26 +1,35 @@
 import AVFoundation
 import MacAmpCore
 
-/// Plays one audio file through AVAudioEngine (player → equalizer → mixer) and feeds the spectrum analyzer.
+/// Plays a file or an internet radio stream through AVAudioEngine (player → equalizer → mixer)
+/// and feeds the spectrum analyzer.
 @MainActor
 final class Player {
     enum State { case stopped, playing, paused }
 
     let analyzer = SpectrumAnalyzer()
     private(set) var file: AVAudioFile?
+    /// URL of the radio stream being played, if any.
+    private(set) var streamURL: URL?
+    private(set) var channelCount = 0
     private(set) var state = State.stopped {
         didSet { onChange?() }
     }
     var onTrackEnd: (() -> Void)?
     /// Called after play state changes and seeks, e.g. to update Now Playing.
     var onChange: (() -> Void)?
+    var onStreamTitle: ((String) -> Void)?
+    var onStreamInfo: ((StreamDecoder.Info) -> Void)?
+    var onStreamFailure: ((String) -> Void)?
 
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let equalizer = AVAudioUnitEQ(numberOfBands: EqualizerSettings.frequencies.count)
-    /// File frame at which the currently scheduled segment starts.
+    private var stream: StreamDecoder?
+    private var sampleRate: Double = 44100
+    /// Source frame at which the currently scheduled audio starts.
     private var segmentStart: AVAudioFramePosition = 0
-    /// Bumped on every reschedule so completions of stale segments are ignored.
+    /// Bumped on every reschedule so callbacks from stale segments and streams are ignored.
     private var generation = 0
 
     init() {
@@ -39,16 +48,16 @@ final class Player {
 
     var duration: Double {
         guard let file else { return 0 }
-        return Double(file.length) / file.processingFormat.sampleRate
+        return Double(file.length) / sampleRate
     }
 
     var currentTime: Double {
-        guard let file, state != .stopped else { return 0 }
-        let rate = file.processingFormat.sampleRate
+        guard state != .stopped else { return 0 }
         guard let renderTime = node.lastRenderTime, let playerTime = node.playerTime(forNodeTime: renderTime) else {
-            return Double(segmentStart) / rate
+            return Double(segmentStart) / sampleRate
         }
-        return min(duration, Double(segmentStart + playerTime.sampleTime) / rate)
+        let seconds = Double(segmentStart + playerTime.sampleTime) / sampleRate
+        return file == nil ? seconds : min(duration, seconds)
     }
 
     var volume: Float {
@@ -64,15 +73,44 @@ final class Player {
     func load(_ url: URL) throws {
         stop()
         let file = try AVAudioFile(forReading: url)
-        engine.disconnectNodeOutput(node)
-        engine.disconnectNodeOutput(equalizer)
-        engine.connect(node, to: equalizer, format: file.processingFormat)
-        engine.connect(equalizer, to: engine.mainMixerNode, format: file.processingFormat)
-        // Bands above Nyquist (e.g. 16 kHz in a 22 kHz file) can't be realized by the filter.
-        let nyquist = Float(file.processingFormat.sampleRate / 2)
-        for band in equalizer.bands { band.bypass = band.frequency >= nyquist * 0.9 }
-        node.pan = balance
+        connect(format: file.processingFormat)
         self.file = file
+        streamURL = nil
+        channelCount = Int(file.processingFormat.channelCount)
+    }
+
+    /// Connects to a Shoutcast/Icecast stream and starts playing as soon as audio arrives.
+    func playStream(_ url: URL) {
+        stop()
+        file = nil
+        streamURL = url
+        channelCount = 0
+        connect(format: StreamDecoder.outputFormat)
+        guard startEngine() else { return }
+
+        let generation = generation
+        // Buffers are scheduled straight from the download task; AVAudioPlayerNode is thread-safe for this.
+        let decoder = StreamDecoder(
+            url: url,
+            output: { [node] buffer in node.scheduleBuffer(buffer) },
+            onTitle: { [weak self] title in Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.onStreamTitle?(title)
+            } },
+            onInfo: { [weak self] info in Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                if let channels = info.channels { self.channelCount = channels }
+                self.onStreamInfo?(info)
+            } },
+            onFailure: { [weak self] message in Task { @MainActor in
+                guard let self, self.generation == generation else { return }
+                self.stop()
+                self.onStreamFailure?(message)
+            } })
+        stream = decoder
+        decoder.start()
+        node.play()
+        state = .playing
     }
 
     func apply(_ settings: EqualizerSettings) {
@@ -83,11 +121,12 @@ final class Player {
 
     /// Starts, resumes after pause, or restarts while already playing (as the original does).
     func play() {
-        switch state {
-        case .paused:
+        if state == .paused {
             node.play()
             state = .playing
-        case .playing, .stopped:
+        } else if let streamURL {
+            playStream(streamURL)
+        } else {
             start(at: 0)
         }
     }
@@ -108,6 +147,8 @@ final class Player {
 
     func stop() {
         generation += 1
+        stream?.cancel()
+        stream = nil
         node.stop()
         segmentStart = 0
         state = .stopped
@@ -116,22 +157,36 @@ final class Player {
     func seek(to seconds: Double) {
         guard let file, state != .stopped else { return }
         let wasPaused = state == .paused
-        let frame = AVAudioFramePosition(seconds * file.processingFormat.sampleRate)
-        start(at: min(max(0, frame), file.length))
+        start(at: min(max(0, AVAudioFramePosition(seconds * sampleRate)), file.length))
         if wasPaused { pause() }
         onChange?()
     }
 
-    private func start(at frame: AVAudioFramePosition) {
-        guard let file else { return }
-        if !engine.isRunning {
-            do {
-                try engine.start()
-            } catch {
-                NSLog("MacAmp: audio engine failed to start: \(error)")
-                return
-            }
+    private func connect(format: AVAudioFormat) {
+        engine.disconnectNodeOutput(node)
+        engine.disconnectNodeOutput(equalizer)
+        engine.connect(node, to: equalizer, format: format)
+        engine.connect(equalizer, to: engine.mainMixerNode, format: format)
+        // Bands above Nyquist (e.g. 16 kHz in a 22 kHz file) can't be realized by the filter.
+        let nyquist = Float(format.sampleRate / 2)
+        for band in equalizer.bands { band.bypass = band.frequency >= nyquist * 0.9 }
+        node.pan = balance
+        sampleRate = format.sampleRate
+    }
+
+    private func startEngine() -> Bool {
+        guard !engine.isRunning else { return true }
+        do {
+            try engine.start()
+            return true
+        } catch {
+            NSLog("MacAmp: audio engine failed to start: \(error)")
+            return false
         }
+    }
+
+    private func start(at frame: AVAudioFramePosition) {
+        guard let file, startEngine() else { return }
         generation += 1
         let generation = generation
         node.stop()
@@ -147,8 +202,8 @@ final class Player {
         state = .playing
     }
 
-    // Closures for the render thread are built in nonisolated helpers so they
-    // don't inherit main-actor isolation (which would trap on the audio thread).
+    // Closures for the render and download threads are built in nonisolated helpers so
+    // they don't inherit main-actor isolation (which would trap off the main thread).
 
     private nonisolated static func schedule(_ file: AVAudioFile, on node: AVAudioPlayerNode,
                                              from frame: AVAudioFramePosition,

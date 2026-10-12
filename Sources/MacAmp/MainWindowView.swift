@@ -174,7 +174,7 @@ final class MainWindowView: SkinView {
             blit(context, "playpaus", CGRect(x: 36, y: 0, width: 3, height: 9), at: CGPoint(x: 24, y: 28))
         }
 
-        let channels = player.file?.processingFormat.channelCount ?? 0
+        let channels = player.channelCount
         blit(context, "monoster", CGRect(x: 29, y: channels == 1 ? 0 : 12, width: 27, height: 12), at: CGPoint(x: 212, y: 41))
         blit(context, "monoster", CGRect(x: 0, y: channels >= 2 ? 0 : 12, width: 29, height: 12), at: CGPoint(x: 239, y: 41))
 

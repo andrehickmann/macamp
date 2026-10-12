@@ -304,7 +304,7 @@ final class PlaylistView: SkinView {
     }
 
     private func addMenu() -> NSMenu {
-        menu([("Add Folder…", #selector(addFolder)), ("Add File(s)…", #selector(addFiles))])
+        menu([("Add URL…", #selector(addURL)), ("Add Folder…", #selector(addFolder)), ("Add File(s)…", #selector(addFiles))])
     }
 
     private func removeMenu() -> NSMenu {
@@ -324,9 +324,12 @@ final class PlaylistView: SkinView {
     }
 
     private func listMenu() -> NSMenu {
-        menu([("New List", #selector(removeAll)), ("Save List…", #selector(saveList)), ("Load List…", #selector(loadList))])
+        menu([("New List", #selector(removeAll)), ("Save List…", #selector(saveList)), ("Load List…", #selector(loadList)),
+              ("Save to Library…", #selector(saveToLibrary))])
     }
 
+    @objc private func addURL() { app.addURL() }
+    @objc private func saveToLibrary() { app.savePlaylistToLibrary() }
     @objc private func addFolder() { app.addFolder() }
     @objc private func addFiles() { app.addFiles() }
     @objc private func removeSelected() { app.playlist.removeSelected() }

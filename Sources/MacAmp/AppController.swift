@@ -14,7 +14,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     let player = Player()
     private(set) var skin: Skin!
     var playlist = Playlist() {
-        didSet { playlistView?.needsDisplay = true }
+        didSet {
+            playlistView?.needsDisplay = true
+            if oldValue.current != playlist.current { libraryView?.playlistChanged() }
+        }
     }
     var equalizer = EqualizerSettings() {
         didSet {
@@ -26,18 +29,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     var shuffle = false
     var repeatAll = false
     private(set) var trackInfo: TrackInfo?
+    /// "[Connecting]" and similar while a radio stream has no title yet.
+    private(set) var streamStatus: String?
     private(set) var mainShade = false
     private(set) var equalizerShade = false
     private(set) var playlistShade = false
     private(set) var doubleSize = false
     private(set) var playlistSize = CGSize(width: 275, height: 232)
+    private(set) var librarySize = CGSize(width: 550, height: 348)
+    private(set) var library = Library() {
+        didSet { libraryView?.libraryChanged() }
+    }
+    /// "Scanning 120/5000" while the library folders are being read.
+    private(set) var libraryScanStatus: String?
 
     private var mainWindow: SkinWindow!
     private var equalizerWindow: SkinWindow!
     private var playlistWindow: SkinWindow!
+    private var libraryWindow: SkinWindow!
     private var mainView: MainWindowView!
     private var equalizerView: EqualizerView?
     private var playlistView: PlaylistView?
+    private var libraryView: LibraryView?
     private var nowPlaying: NowPlaying?
     private var windowDrag: (mouse: CGPoint, primary: NSWindow, origins: [(NSWindow, CGPoint)])?
     /// Per-file equalizer curves for EQ "Auto": path → [preamp] + bands.
@@ -48,9 +61,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var pendingSkin: URL?
     private var tick = 0
 
-    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow].compactMap { $0 } }
+    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow].compactMap { $0 } }
     var equalizerVisible: Bool { equalizerWindow?.isVisible ?? false }
     var playlistVisible: Bool { playlistWindow?.isVisible ?? false }
+    var libraryVisible: Bool { libraryWindow?.isVisible ?? false }
+    /// Snapshot runs must not touch the user's settings, window positions or library.
+    private var isSnapshotRun: Bool { UserDefaults.standard.string(forKey: "snapshot") != nil }
+    private static let libraryFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("MacAmp/library.json")
 
     // MARK: Lifecycle
 
@@ -61,6 +79,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
         self.skin = skin
         restoreSettings()
+        loadLibrary()
 
         mainView = MainWindowView(app: self)
         let equalizerView = EqualizerView(app: self)
@@ -70,27 +89,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let (main, mainRestored) = makeWindow(mainView, name: "MainWindow", title: "MacAmp")
         let (equalizer, equalizerRestored) = makeWindow(equalizerView, name: "EqualizerWindow", title: "MacAmp Equalizer")
         let (playlist, playlistRestored) = makeWindow(playlistView, name: "PlaylistWindow", title: "MacAmp Playlist")
+        let libraryView = LibraryView(app: self)
+        self.libraryView = libraryView
+        let (library, libraryRestored) = makeWindow(libraryView, name: "LibraryWindow", title: "MacAmp Library")
+        libraryWindow = library
         mainWindow = main
         equalizerWindow = equalizer
         playlistWindow = playlist
-        for view in [mainView, equalizerView, playlistView] as [SkinView] { updateSize(of: view) }
+        for view in [mainView, equalizerView, playlistView, libraryView] as [SkinView] { updateSize(of: view) }
 
         // First launch: stack equalizer and playlist below the main window, like the original.
         if !mainRestored { main.center() }
         if !equalizerRestored { equalizer.setFrameTopLeftPoint(CGPoint(x: main.frame.minX, y: main.frame.minY)) }
         if !playlistRestored { playlist.setFrameTopLeftPoint(CGPoint(x: equalizer.frame.minX, y: equalizer.frame.minY)) }
+        if !libraryRestored { library.setFrameTopLeftPoint(CGPoint(x: main.frame.maxX, y: main.frame.maxY)) }
 
         main.makeKeyAndOrderFront(nil)
         main.makeFirstResponder(mainView)
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "equalizerVisible") as? Bool ?? true { equalizer.orderFront(nil) }
         if defaults.object(forKey: "playlistVisible") as? Bool ?? true { playlist.orderFront(nil) }
+        if defaults.bool(forKey: "libraryVisible") { library.orderFront(nil) }
         NSApp.mainMenu = makeMainMenu()
         NSApp.activate()
 
         nowPlaying = NowPlaying(app: self)
         player.onTrackEnd = { [weak self] in self?.trackEnded() }
         player.onChange = { [weak self] in self?.nowPlaying?.update() }
+        player.onStreamTitle = { [weak self] title in self?.streamTitleChanged(title) }
+        player.onStreamInfo = { [weak self] info in self?.streamInfoChanged(info) }
+        player.onStreamFailure = { [weak self] message in
+            NSLog("MacAmp: stream failed: \(message)")
+            self?.streamStatus = "[\(message)]"
+        }
         player.apply(self.equalizer)
         loadInfo(for: self.playlist.entries)
 
@@ -103,14 +134,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let files = pendingFiles + Self.fileArguments()
         pendingFiles = []
         if !files.isEmpty { open(files, replacing: true) }
+        if let folder = defaults.string(forKey: "libraryFolder") { addLibraryFolders([URL(fileURLWithPath: folder)]) }
         if let path = defaults.string(forKey: "snapshot") { writeSnapshots(to: path) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
-        guard launched, UserDefaults.standard.string(forKey: "snapshot") == nil else { return }
+        guard launched, !isSnapshotRun else { return }
         saveSettings()
+        saveLibrary()
     }
 
     /// Files opened from Finder; skins are applied, everything else replaces the playlist.
@@ -158,15 +191,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         return playlist.entries[current].displayTitle
     }
 
-    /// "1. Artist - Title (3:45)" as shown in the main window.
+    /// "1. Artist - Title (3:45)" as shown in the main window; streams show no length.
     var marqueeText: String {
         guard let current = playlist.current, playlist.entries.indices.contains(current) else { return "MACAMP" }
         let entry = playlist.entries[current]
-        return "\(current + 1). \(entry.displayTitle) (\(TimeDisplay.string(seconds: entry.duration ?? player.duration)))"
+        if let streamStatus { return "\(current + 1). \(streamStatus)" }
+        guard let duration = entry.duration ?? (player.file != nil ? player.duration : nil) else {
+            return "\(current + 1). \(entry.displayTitle)"
+        }
+        return "\(current + 1). \(entry.displayTitle) (\(TimeDisplay.string(seconds: duration)))"
     }
 
     func play() {
-        if player.file == nil || playlist.current == nil {
+        if (player.file == nil && player.streamURL == nil) || playlist.current == nil {
             playTrack(at: playlist.current ?? playlist.selection.first ?? 0)
         } else {
             player.play()
@@ -191,6 +228,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         guard playlist.entries.indices.contains(index) else { return }
         playlist.current = index
         let url = playlist.entries[index].url
+        streamStatus = nil
+        guard url.isFileURL else { return playStream(url, at: index) }
         do {
             try player.load(url)
         } catch {
@@ -199,6 +238,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
             return
         }
         applyAutoPreset(for: url)
+        library.recordPlay(of: url)
         player.play()
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let duration = player.duration
@@ -206,6 +246,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
                               kHz: Int(((player.file?.processingFormat.sampleRate ?? 0) / 1000).rounded()))
         if playlist.entries[index].duration == nil { playlist.entries[index].duration = duration }
         nowPlaying?.update()
+    }
+
+    private func playStream(_ url: URL, at index: Int) {
+        player.stop()
+        trackInfo = nil
+        streamStatus = "[Connecting]"
+        Task {
+            let resolved = await Self.resolveStream(url)
+            guard playlist.current == index, playlist.entries.indices.contains(index), playlist.entries[index].url == url else { return }
+            player.playStream(resolved)
+        }
+    }
+
+    /// Shoutcast directories hand out .pls/.m3u files; play their first entry.
+    private nonisolated static func resolveStream(_ url: URL) async -> URL {
+        let fileExtension = url.pathExtension.lowercased()
+        guard ["pls", "m3u"].contains(fileExtension),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return url }
+        return PlaylistFile.parse(text, extension: fileExtension, relativeTo: url.deletingLastPathComponent()).first?.url ?? url
+    }
+
+    private func streamTitleChanged(_ title: String) {
+        streamStatus = nil
+        if let current = playlist.current, playlist.entries.indices.contains(current) { playlist.entries[current].title = title }
+        nowPlaying?.update()
+    }
+
+    private func streamInfoChanged(_ info: StreamDecoder.Info) {
+        let kbps = info.bitrate ?? trackInfo?.kbps ?? 0
+        let kHz = info.sampleRate.map { Int(($0 / 1000).rounded()) } ?? trackInfo?.kHz ?? 0
+        trackInfo = TrackInfo(kbps: kbps, kHz: kHz)
+        if let name = info.name, let current = playlist.current, playlist.entries.indices.contains(current),
+           playlist.entries[current].title == nil {
+            playlist.entries[current].title = name
+        }
+        if info.sampleRate != nil, streamStatus == "[Connecting]" { streamStatus = nil }
     }
 
     func handle(_ command: NowPlaying.Command) {
@@ -244,31 +321,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     /// Fills in tag titles and durations in the background, one file at a time.
     private func loadInfo(for entries: [PlaylistEntry]) {
-        let urls = entries.filter { $0.title == nil || $0.duration == nil }.map(\.url)
+        let urls = entries.filter { $0.url.isFileURL && ($0.title == nil || $0.duration == nil) }.map(\.url)
         guard !urls.isEmpty else { return }
         Task {
             for url in urls {
-                let info = await Self.info(of: url)
+                let tags = await Tags.read(from: url)
                 for index in playlist.entries.indices where playlist.entries[index].url == url {
-                    if playlist.entries[index].title == nil { playlist.entries[index].title = info.title }
-                    if playlist.entries[index].duration == nil { playlist.entries[index].duration = info.duration }
+                    if playlist.entries[index].title == nil { playlist.entries[index].title = tags.displayTitle }
+                    if playlist.entries[index].duration == nil { playlist.entries[index].duration = tags.duration }
                 }
             }
         }
-    }
-
-    /// "Artist - Title" and duration; runs off the main actor because AVFoundation metadata isn't Sendable.
-    private nonisolated static func info(of url: URL) async -> (title: String?, duration: Double?) {
-        let asset = AVURLAsset(url: url)
-        guard let (metadata, duration) = try? await asset.load(.commonMetadata, .duration) else { return (nil, nil) }
-        func tag(_ identifier: AVMetadataIdentifier) async -> String? {
-            let item = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: identifier).first
-            return try? await item?.load(.stringValue)
-        }
-        let title = await tag(.commonIdentifierTitle)
-        let artist = await tag(.commonIdentifierArtist)
-        let seconds = duration.seconds.isFinite && duration.seconds > 0 ? duration.seconds : nil
-        return (title.map { t in artist.map { "\($0) - \(t)" } ?? t }, seconds)
     }
 
     // MARK: Equalizer
@@ -353,6 +416,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         if let playlistView { updateSize(of: playlistView) }
     }
 
+    func setLibrarySize(_ size: CGSize) {
+        guard size != librarySize else { return }
+        librarySize = size
+        if let libraryView { updateSize(of: libraryView) }
+    }
+
+    @objc func toggleLibrary() {
+        toggleVisibility(of: libraryWindow)
+        if libraryVisible { libraryWindow.makeKey() }
+    }
+
     @objc func toggleMainShadeAction() { toggleMainShade() }
 
     @objc func toggleDoubleSize() {
@@ -394,6 +468,103 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     private func refreshViews() {
         for window in skinWindows { window.contentView?.needsDisplay = true }
+    }
+
+    // MARK: Media library
+
+    func isCurrent(_ url: URL) -> Bool {
+        guard let current = playlist.current, playlist.entries.indices.contains(current) else { return false }
+        return playlist.entries[current].url.standardizedFileURL.path == url.standardizedFileURL.path
+    }
+
+    private func entries(for tracks: [LibraryTrack]) -> [PlaylistEntry] {
+        tracks.map { PlaylistEntry(url: $0.url, title: $0.title == nil ? nil : $0.displayTitle, duration: $0.duration) }
+    }
+
+    func playLibraryTracks(_ tracks: [LibraryTrack]) {
+        guard !tracks.isEmpty else { return }
+        player.stop()
+        playlist = Playlist(entries: entries(for: tracks))
+        playTrack(at: 0)
+    }
+
+    func enqueueLibraryTracks(_ tracks: [LibraryTrack]) {
+        playlist.entries += entries(for: tracks)
+    }
+
+    func addLibraryFolder() {
+        if let folders = chooseFiles(directories: true) { addLibraryFolders(folders) }
+    }
+
+    func addLibraryFolders(_ folders: [URL]) {
+        let new = folders.map(\.standardizedFileURL).filter { !library.folders.contains($0) }
+        guard !new.isEmpty else { return }
+        library.folders += new
+        rescanLibrary()
+    }
+
+    func rescanLibrary() {
+        guard libraryScanStatus == nil else { return }
+        libraryScanStatus = "Scanning…"
+        libraryView?.updateStatus()
+        let folders = library.folders
+        let known = Dictionary(library.tracks.compactMap { track in track.fileModified.map { (track.url, $0) } },
+                               uniquingKeysWith: { first, _ in first })
+        Task {
+            let result = await LibraryScanner.scan(folders: folders, known: known) { done, total in
+                Task { @MainActor in
+                    self.libraryScanStatus = "Scanning \(done)/\(total)"
+                    self.libraryView?.updateStatus()
+                }
+            }
+            library.merge(result.tracks, present: result.present, scannedFolders: folders)
+            libraryScanStatus = nil
+            libraryView?.updateStatus()
+            saveLibrary()
+        }
+    }
+
+    func rate(_ urls: [URL], stars: Int) {
+        for url in urls { if let index = library.index(of: url) { library.tracks[index].rating = stars } }
+        saveLibrary()
+    }
+
+    func removeFromLibrary(_ urls: [URL]) {
+        let paths = Set(urls.map { $0.standardizedFileURL.path })
+        library.tracks.removeAll { paths.contains($0.url.standardizedFileURL.path) }
+        saveLibrary()
+    }
+
+    func savePlaylistToLibrary() {
+        guard !playlist.entries.isEmpty,
+              let name = askForText("Save Playlist to Library", "Name of the playlist:", placeholder: "My Playlist", button: "Save") else { return }
+        library.playlists.append(SavedPlaylist(name: name, entries: playlist.entries))
+        saveLibrary()
+    }
+
+    func deleteLibraryPlaylist(at index: Int) {
+        guard library.playlists.indices.contains(index) else { return }
+        library.playlists.remove(at: index)
+        saveLibrary()
+    }
+
+    private func loadLibrary() {
+        guard let data = try? Data(contentsOf: Self.libraryFile) else { return }
+        do {
+            library = try JSONDecoder().decode(Library.self, from: data)
+        } catch {
+            NSLog("MacAmp: cannot read library \(Self.libraryFile.path): \(error)")
+        }
+    }
+
+    private func saveLibrary() {
+        guard !isSnapshotRun else { return }
+        do {
+            try FileManager.default.createDirectory(at: Self.libraryFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(library).write(to: Self.libraryFile, options: .atomic)
+        } catch {
+            NSLog("MacAmp: cannot save library: \(error)")
+        }
     }
 
     // MARK: Main window actions and keys
@@ -456,6 +627,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         if let urls = chooseFiles(directories: false) { open(urls, replacing: false) }
     }
 
+    @objc func openURL() {
+        if let url = askForURL() { open([url], replacing: true) }
+    }
+
+    func addURL() {
+        if let url = askForURL() { open([url], replacing: false) }
+    }
+
+    private func askForURL() -> URL? {
+        guard let text = askForText("Open URL", "Shoutcast/Icecast stream (MP3 or AAC) or a .pls/.m3u link:", placeholder: "https://"),
+              let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+        return url
+    }
+
+    private func askForText(_ title: String, _ message: String, placeholder: String, button: String = "Open") -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(frame: CGRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = placeholder
+        alert.accessoryView = field
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let value = field.stringValue.trimmingCharacters(in: .whitespaces)
+        return value.isEmpty ? nil : value
+    }
+
     func addFolder() {
         if let urls = chooseFiles(directories: true) { open(urls, replacing: false) }
     }
@@ -480,6 +680,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private func setSkin(_ skin: Skin, from url: URL) {
         self.skin = skin
         UserDefaults.standard.set(url.path, forKey: "skinPath")
+        libraryView?.applySkinColors()
         for window in skinWindows {
             window.contentView?.needsDisplay = true
             DispatchQueue.main.async { window.invalidateShadow() }
@@ -529,6 +730,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let fileMenu = NSMenu(title: "File")
         addItem(to: fileMenu, "Open File…", #selector(openFiles), key: "o")
         addItem(to: fileMenu, "Open Folder…", #selector(openFolder), key: "O")
+        addItem(to: fileMenu, "Open URL…", #selector(openURL), key: "l")
         addItem(to: fileMenu, "Load Skin…", #selector(chooseSkin))
 
         let windowMenu = NSMenu(title: "Window")
@@ -545,6 +747,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let menu = NSMenu()
         addItem(to: menu, "Open File…", #selector(openFiles))
         addItem(to: menu, "Open Folder…", #selector(openFolder))
+        addItem(to: menu, "Open URL…", #selector(openURL))
         addItem(to: menu, "Load Skin…", #selector(chooseSkin))
         menu.addItem(.separator())
         addWindowItems(to: menu)
@@ -568,6 +771,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private func addWindowItems(to menu: NSMenu) {
         addItem(to: menu, "Equalizer", #selector(toggleEqualizer), key: "g", modifiers: .option)
         addItem(to: menu, "Playlist Editor", #selector(togglePlaylist), key: "e", modifiers: .option)
+        addItem(to: menu, "Media Library", #selector(toggleLibrary), key: "l", modifiers: .option)
         addItem(to: menu, "Window Shade", #selector(toggleMainShadeAction), key: "w", modifiers: .control)
         addItem(to: menu, "Double Size", #selector(toggleDoubleSize), key: "d", modifiers: .control)
     }
@@ -585,6 +789,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let on: Bool? = switch menuItem.action {
         case #selector(toggleEqualizer): equalizerVisible
         case #selector(togglePlaylist): playlistVisible
+        case #selector(toggleLibrary): libraryVisible
         case #selector(toggleMainShadeAction): mainShade
         case #selector(toggleDoubleSize): doubleSize
         default: nil
@@ -607,6 +812,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         doubleSize = defaults.bool(forKey: "doubleSize")
         if let size = defaults.array(forKey: "playlistSize") as? [Double], size.count == 2 {
             playlistSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
+        }
+        if let size = defaults.array(forKey: "librarySize") as? [Double], size.count == 2 {
+            librarySize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
         }
         autoPresets = defaults.dictionary(forKey: "autoPresets") as? [String: [Float]] ?? [:]
         let decoder = JSONDecoder()
@@ -637,6 +845,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         defaults.set([playlistSize.width, playlistSize.height], forKey: "playlistSize")
         defaults.set(equalizerVisible, forKey: "equalizerVisible")
         defaults.set(playlistVisible, forKey: "playlistVisible")
+        defaults.set(libraryVisible, forKey: "libraryVisible")
+        defaults.set([librarySize.width, librarySize.height], forKey: "librarySize")
         defaults.set(autoPresets, forKey: "autoPresets")
         defaults.set(try? encoder.encode(equalizer), forKey: "equalizer")
         defaults.set(try? encoder.encode(playlist.entries), forKey: "playlist")
@@ -652,6 +862,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         while let argument = arguments.next() {
             if argument.hasPrefix("-") {
                 _ = arguments.next()
+            } else if argument.contains("://"), let url = URL(string: argument) {
+                files.append(url)
             } else {
                 files.append(URL(fileURLWithPath: argument))
             }
@@ -665,7 +877,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         let delay = max(1.5, UserDefaults.standard.double(forKey: "snapshotDelay"))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             let base = URL(fileURLWithPath: path).deletingPathExtension().path
-            let views: [(String, NSView?)] = [("main", mainView), ("equalizer", equalizerView), ("playlist", playlistView)]
+            let views: [(String, NSView?)] = [("main", mainView), ("equalizer", equalizerView), ("playlist", playlistView),
+                                              ("library", libraryView)]
             for (name, view) in views {
                 guard let view, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
                 view.cacheDisplay(in: view.bounds, to: rep)
