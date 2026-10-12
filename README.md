@@ -7,6 +7,8 @@ A native macOS player that recreates the classic Winamp 2.x interface and loads 
 Plays MP3, AAC/M4A, ALAC, FLAC, Ogg Vorbis, Opus, WAV and AIFF through Core Audio, plus
 Shoutcast/Icecast radio streams (MP3/AAC).
 
+<img src="docs/library.png" alt="MacAmp media library" width="550">
+
 ## Run
 
 ```bash
