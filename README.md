@@ -58,7 +58,7 @@ Development options (passed as user defaults):
 - Internet radio: stream titles from ICY metadata, `.pls`/`.m3u` station links, equalizer and analyzer included
 - Media library (`gen.bmp` frame): watched folders, tag scan, search, smart views (most/recently played,
   recently added, never played, top rated), ratings, play counts, saved playlists, drag to playlist
-- Spotify (Premium, via the Web API): connect from the library or File menu, browse Liked Songs, playlists and
+- Spotify (experimental; Premium and your own Spotify developer Client ID required, not configurable in the app yet): connect from the library or File menu, browse Liked Songs, playlists and
   search; Spotify tracks join the playlist and are controlled from the main window while a Spotify app plays them
 - Spectrum analyzer, media keys and Control Center "Now Playing"
 - Settings, playlist and window positions persist across launches

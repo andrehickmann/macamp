@@ -892,11 +892,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         menu.addItem(withTitle: skins.title, action: nil, keyEquivalent: "").submenu = skins
     }
 
+    // MARK: About
+
+    @objc func showAbout() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "development build"
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacing = 6
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph,
+        ]
+        let small = body.merging([.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor]) { _, new in new }
+        let credits = NSMutableAttributedString()
+        func add(_ text: String, _ attributes: [NSAttributedString.Key: Any], link: String? = nil) {
+            var attributes = attributes
+            if let link { attributes[.link] = URL(string: link) }
+            credits.append(NSAttributedString(string: text, attributes: attributes))
+        }
+        add("A native Mac player in the spirit of Winamp 2.x: classic skins, equalizer, playlist, media library, internet radio and Spotify.\n", body)
+        add("Website", body, link: "https://andrehickmann.github.io/macamp/")
+        add("  ·  ", body)
+        add("GitHub", body, link: "https://github.com/andrehickmann/macamp")
+        add("\n\nSkins AndAmp Dark, Light and Spot by ", small)
+        add("Mattix", small, link: "https://mattix.nl")
+        add(", licensed under ", small)
+        add("CC BY 4.0", small, link: "https://creativecommons.org/licenses/by/4.0/")
+        add(".\nSpotify playback uses the Spotify Web API; Spotify is a trademark of Spotify AB.\n", small)
+        add("MacAmp is an independent project, not affiliated with Winamp, Nullsoft or Llama Group.", small)
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "MacAmp",
+            .applicationVersion: version,
+            .version: "",
+            .credits: credits,
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "© 2026 André Hickmann · MIT License",
+        ])
+        NSApp.activate()
+    }
+
     // MARK: Menus
 
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu(title: "MacAmp")
-        appMenu.addItem(withTitle: "About MacAmp", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        addItem(to: appMenu, "About MacAmp", #selector(showAbout))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit MacAmp", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 

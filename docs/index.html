@@ -183,6 +183,7 @@ h2 { font: 700 clamp(26px, 3.6vw, 40px)/1.1 var(--pixel); margin: 0; color: #f2f
 .split li { padding: 10px 0 10px 28px; position: relative; border-top: 1px dashed #33335a; color: var(--muted); }
 .split li::before { content: "▶"; position: absolute; left: 0; top: 11px; font-size: 12px; color: var(--lcd); }
 .split li b { color: var(--text); font-weight: 500; }
+.exp { font: 400 10px var(--pixel); text-transform: uppercase; letter-spacing: .08em; color: #1a0f00; background: var(--orange); padding: 2px 6px; margin-right: 4px; vertical-align: 2px; }
 .shot { padding: 6px; }
 .shot img { box-shadow: 0 0 0 1px #000; }
 @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
@@ -283,7 +284,7 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #6f6f90; max-width: 80c
       <div class="titlebar"><span class="groove"></span>MacAmp Playlist<span class="groove"></span></div>
       <div class="body lcd">
         <ol>
-          <li class="now"><h3>Any classic skin</h3><span class="tag">.WSZ</span><p>Load <code>.wsz</code> files or unpacked skin folders. Shade modes, double size and custom <code>region.txt</code> window shapes included.</p></li>
+          <li class="now"><h3>Any classic skin</h3><span class="tag">.WSZ</span><p>Three AndAmp skins built in, plus any <code>.wsz</code> file or unpacked skin folder, switchable from the Skins menu. Shade modes, double size and custom <code>region.txt</code> window shapes included.</p></li>
           <li><h3>Snapping windows</h3><span class="tag">DOCK</span><p>Main window, equalizer and playlist snap to each other and to screen edges. Drag the main window and docked windows follow.</p></li>
           <li><h3>10-band equalizer</h3><span class="tag">EQ</span><p>Preamp, presets and per-file "Auto" curves, applied to local files and radio streams alike.</p></li>
           <li><h3>Playlist editor</h3><span class="tag">PL</span><p>Multi-select, drag to reorder, sort, reverse, randomize, remove missing, resize, and save or load <code>.m3u</code>.</p></li>
@@ -308,7 +309,7 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #6f6f90; max-width: 80c
           <li><b>Watched folders</b> are scanned for tags and stay up to date.</li>
           <li><b>Smart views:</b> most played, recently added, never played, top rated.</li>
           <li><b>Drag to playlist</b> or enqueue straight from search results.</li>
-          <li><b>Spotify</b> (Premium, experimental): browse Liked Songs and playlists from the library.</li>
+          <li><b>Spotify</b> <span class="exp">experimental</span> browse Liked Songs and playlists from the library. Needs Spotify Premium and your own Spotify developer Client ID, which can't be set in the app yet.</li>
         </ul>
       </div>
       <div class="shot bevel"><img src="library.png" width="550" height="348" alt="Media library with local media views and a track list" loading="lazy"></div>
@@ -354,8 +355,8 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #6f6f90; max-width: 80c
       <div class="step bevel">
         <div class="titlebar"><span class="groove"></span>Step 3<span class="groove"></span></div>
         <div class="content">
-          <h3>Add skins</h3>
-          <p>Thousands of classic skins wait in the <a href="https://skins.webamp.org/">skin museum</a>. Drop a <code>.wsz</code> onto MacAmp to add it to File › Skins.</p>
+          <h3>Pick a skin</h3>
+          <p>Three AndAmp skins are built in. Thousands more wait in the <a href="https://skins.webamp.org/">skin museum</a>: drop a <code>.wsz</code> onto MacAmp to add it to File › Skins.</p>
         </div>
       </div>
     </div>
@@ -381,7 +382,7 @@ cd macamp &amp;&amp; swift run MacAmp</pre>
       <span>MacAmp · <a href="https://github.com/andrehickmann/macamp/blob/main/LICENSE">MIT License</a></span>
       <span><a href="https://github.com/andrehickmann/macamp">GitHub</a> · <a href="https://github.com/andrehickmann/macamp/releases">Releases</a></span>
     </div>
-    <p class="fine">MacAmp is an independent project and is not affiliated with or endorsed by Winamp, Nullsoft or Llama Group. Winamp is a trademark of its respective owner. Skins are the work of their respective authors.</p>
+    <p class="fine">MacAmp is an independent project and is not affiliated with or endorsed by Winamp, Nullsoft or Llama Group. Winamp is a trademark of its respective owner. Skins are the work of their respective authors. Screenshots show the bundled AndAmp Dark skin by <a href="https://mattix.nl">Mattix</a> from <a href="https://github.com/mattijsf/andamp">AndAmp</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.</p>
   </div>
 </footer>
 
