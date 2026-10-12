@@ -83,7 +83,7 @@ final class MainWindowView: SkinView {
             drawShade(context)
             return
         }
-        let player = app.player
+        let player = app.transport
         blit(context, "main", CGRect(x: 0, y: 0, width: 275, height: 116), at: .zero)
         blit(context, "titlebar", CGRect(x: 27, y: isActive ? 0 : 15, width: 275, height: 14), at: .zero)
         drawTitleButtons(context, shadeButton: CGPoint(x: 0, y: 18), shadeButtonDown: CGPoint(x: 9, y: 18))
@@ -95,7 +95,7 @@ final class MainWindowView: SkinView {
     }
 
     private func drawShade(_ context: CGContext) {
-        let player = app.player
+        let player = app.transport
         blit(context, "titlebar", CGRect(x: 27, y: isActive ? 29 : 42, width: 275, height: 14), at: .zero)
         drawTitleButtons(context, shadeButton: CGPoint(x: 0, y: 27), shadeButtonDown: CGPoint(x: 9, y: 27))
 
@@ -163,7 +163,7 @@ final class MainWindowView: SkinView {
         windowToggle(.playlist, x: 23, on: app.playlistVisible)
     }
 
-    private func drawStatus(_ context: CGContext, _ player: Player) {
+    private func drawStatus(_ context: CGContext, _ player: any Transport) {
         let stateX: CGFloat = switch player.state {
         case .playing: 0
         case .paused: 9
@@ -194,7 +194,7 @@ final class MainWindowView: SkinView {
         drawMarquee(context, app.marqueeText, in: CGRect(x: 111, y: 27, width: 155, height: 6), tick: tick)
     }
 
-    private func drawSliders(_ context: CGContext, _ player: Player) {
+    private func drawSliders(_ context: CGContext, _ player: any Transport) {
         let position = frame(.position)
         blit(context, "posbar", CGRect(x: 0, y: 0, width: 248, height: 10), at: position.origin)
         if player.state != .stopped, player.duration > 0 {
@@ -212,7 +212,7 @@ final class MainWindowView: SkinView {
         blit(context, "volume", thumb(.volume), at: CGPoint(x: volume.minX + level * (volume.width - 14), y: volume.minY + 1))
 
         let balance = frame(.balance)
-        let pan = CGFloat(player.balance)
+        let pan = CGFloat(app.player.balance)
         blit(context, "balance", CGRect(x: 9, y: (abs(pan) * 27).rounded() * 15, width: 38, height: 13), at: balance.origin)
         blit(context, "balance", thumb(.balance), at: CGPoint(x: balance.minX + (pan + 1) / 2 * (balance.width - 14), y: balance.minY + 1))
     }
@@ -274,7 +274,7 @@ final class MainWindowView: SkinView {
         guard let pressed else { return }
         if pressed == .position, let progress = dragProgress {
             dragProgress = nil
-            app.player.seek(to: progress * app.player.duration)
+            app.transport.seek(to: progress * app.transport.duration)
         } else if !pressed.isSlider, control(at: convert(event.locationInWindow, from: nil)) == pressed {
             app.perform(pressed, event: event, in: self)
         }
@@ -284,11 +284,11 @@ final class MainWindowView: SkinView {
         let target = frame(control)
         switch control {
         case .position:
-            guard app.player.state != .stopped else { return }
+            guard app.transport.state != .stopped else { return }
             let thumb: CGFloat = app.mainShade ? 3 : 29
             dragProgress = Double(min(1, max(0, (point.x - target.minX - thumb / 2) / (target.width - thumb))))
         case .volume:
-            app.player.volume = Float(min(1, max(0, (point.x - target.minX - 7) / (target.width - 14))))
+            app.transport.volume = Float(min(1, max(0, (point.x - target.minX - 7) / (target.width - 14))))
         case .balance:
             let value = Float(min(1, max(-1, (point.x - target.minX - 7) / (target.width - 14) * 2 - 1)))
             app.player.balance = abs(value) < 0.1 ? 0 : value  // snap to center

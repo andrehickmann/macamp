@@ -116,7 +116,7 @@ final class EqualizerView: SkinView {
             blit(context, "eq_ex", CGRect(x: spriteX + part, y: 30, width: 3, height: 7),
                  at: CGPoint(x: target.minX + value * (target.width - 3), y: target.minY))
         }
-        thumb(.volume, value: CGFloat(player.volume), spriteX: 1)
+        thumb(.volume, value: CGFloat(app.transport.volume), spriteX: 1)
         thumb(.balance, value: (CGFloat(player.balance) + 1) / 2, spriteX: 11)
     }
 
@@ -169,7 +169,7 @@ final class EqualizerView: SkinView {
         case .preamp: app.equalizer.preamp = sliderValue()
         case .band(let band): app.equalizer.bands[band] = sliderValue()
         case .volume:
-            app.player.volume = Float(min(1, max(0, (point.x - target.minX - 1.5) / (target.width - 3))))
+            app.transport.volume = Float(min(1, max(0, (point.x - target.minX - 1.5) / (target.width - 3))))
         case .balance:
             let value = Float(min(1, max(-1, (point.x - target.minX - 1.5) / (target.width - 3) * 2 - 1)))
             app.player.balance = abs(value) < 0.1 ? 0 : value

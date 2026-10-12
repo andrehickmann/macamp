@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import MacAmpCore
 
@@ -128,6 +129,8 @@ import Testing
     // CoreGraphics' y axis points up: the font row at image y 88...94 is context y 5...11.
     context.fill(CGRect(x: 1, y: 5, width: 4, height: 7))
     context.fill(CGRect(x: 6, y: 5, width: 3, height: 7))
+    // The title bar may use any color; only the font row's own separator counts.
+    context.fill(CGRect(x: 20, y: 90, width: 10, height: 10))
     let font = Skin.parseGenFont(try #require(context.makeImage()))
     #expect(font["A"] == CGRect(x: 1, y: 88, width: 4, height: 7))
     #expect(font["B"] == CGRect(x: 6, y: 88, width: 3, height: 7))
@@ -159,4 +162,81 @@ import Testing
     #expect(library.tracks[0].title == "Señorita (Remastered)")
     #expect(library.tracks[0].playCount == 1 && library.tracks[0].rating == 5)
     #expect(library.tracks[0].dateAdded == a.dateAdded)
+}
+
+@Test func pkceMatchesRFC7636AndCallbackChecksState() throws {
+    #expect(PKCE.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+    #expect(PKCE.makeVerifier().count == 64)
+
+    let url = SpotifyAuth.authorizeURL(clientID: "id", redirectURI: "macamp://callback", scopes: ["a", "b"],
+                                       challenge: "c", state: "s")
+    let items = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+    #expect(items.first { $0.name == "scope" }?.value == "a b")
+    #expect(items.first { $0.name == "redirect_uri" }?.value == "macamp://callback")
+
+    let callback = try #require(URL(string: "macamp://callback?code=xyz&state=s"))
+    #expect(SpotifyAuth.code(fromCallback: callback, expectedState: "s") == "xyz")
+    #expect(SpotifyAuth.code(fromCallback: callback, expectedState: "other") == nil)
+}
+
+@Test func spotifyPlaybackDecodesIntoLibraryTrack() throws {
+    let json = """
+    {"is_playing": true, "progress_ms": 61000, "shuffle_state": false, "repeat_state": "off",
+     "device": {"id": "d1", "name": "MacBook", "type": "Computer", "is_active": true, "volume_percent": 80},
+     "item": {"uri": "spotify:track:abc", "name": "Song", "duration_ms": 225000, "track_number": 3,
+              "artists": [{"name": "A"}, {"name": "B"}], "album": {"name": "Album", "release_date": "1999-05-01"}}}
+    """
+    let playback = try JSONDecoder.spotify.decode(SpotifyPlayback.self, from: Data(json.utf8))
+    let track = try #require(playback.item?.libraryTrack)
+    #expect(track.url.absoluteString == "spotify:track:abc")
+    #expect(track.displayTitle == "A, B - Song")
+    #expect(track.year == 1999 && track.trackNumber == 3 && track.duration == 225)
+    #expect(playback.device?.volumePercent == 80)
+
+    let page = try JSONDecoder.spotify.decode(SpotifyPage<SpotifyItemEntry>.self, from: Data("""
+    {"items": [{"track": {"uri": "spotify:track:x", "name": "X", "duration_ms": 1000}}, {"track": {"type": "episode"}}], "next": null}
+    """.utf8))
+    #expect(page.items.compactMap(\.content).map(\.name) == ["X"])
+}
+
+@Test func availableSkinsAreSortedAndLaterDirectoriesOverride() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bundled = root.appendingPathComponent("bundled"), user = root.appendingPathComponent("user")
+    for path in ["bundled/Base.wsz", "bundled/zed.zip", "user/Base.wsz", "user/readme.txt"] {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(path).deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: root.appendingPathComponent(path).path, contents: Data())
+    }
+    try FileManager.default.createDirectory(at: user.appendingPathComponent("Folder Skin"), withIntermediateDirectories: true)
+
+    let skins = Skin.available(in: [bundled, user, root.appendingPathComponent("missing")])
+    #expect(skins.map(\.name) == ["Base", "Folder Skin", "zed"])
+    #expect(skins[0].url.deletingLastPathComponent().lastPathComponent == "user")
+}
+
+@Test func wszSheetsStayDrawableAfterTheUnpackedFilesAreGone() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appendingPathComponent("skin"), archive = root.appendingPathComponent("skin.wsz")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+    let pixel = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                          space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    pixel.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+    pixel.fill(CGRect(x: 0, y: 0, width: 1, height: 1))
+    let destination = CGImageDestinationCreateWithURL(folder.appendingPathComponent("main.png") as CFURL, "public.png" as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, pixel.makeImage()!, nil)
+    #expect(CGImageDestinationFinalize(destination))
+    let zip = Process()
+    zip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+    zip.arguments = ["-c", "-k", folder.path, archive.path]
+    try zip.run()
+    zip.waitUntilExit()
+
+    let skin = try Skin(contentsOf: archive)
+    let target = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                           space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    target.draw(try #require(skin.sheets["main"]), in: CGRect(x: 0, y: 0, width: 1, height: 1))
+    #expect(target.data!.load(as: UInt8.self) == 255)
 }

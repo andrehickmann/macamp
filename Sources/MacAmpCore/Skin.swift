@@ -33,12 +33,15 @@ public struct Skin {
 
         var sheets: [String: CGImage] = [:]
         for (name, file) in files where name.hasSuffix(".bmp") || name.hasSuffix(".png") {
-            if let source = CGImageSourceCreateWithURL(file as CFURL, nil),
+            // Read into memory: ImageIO decodes lazily, and an unpacked .wsz is deleted when init returns.
+            if let data = try? Data(contentsOf: file), let source = CGImageSourceCreateWithData(data as CFData, nil),
                let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
                 sheets[String(name.dropLast(4))] = image
             }
         }
         guard sheets["main"] != nil else { throw SkinError.missingMain }
+        // Like Winamp, use nums_ex.bmp when a skin ships no numbers.bmp.
+        sheets["numbers"] = sheets["numbers"] ?? sheets["nums_ex"]
         self.sheets = sheets
 
         let parsed = files["viscolor.txt"]
@@ -52,11 +55,27 @@ public struct Skin {
         genFont = sheets["gen"].map(Self.parseGenFont) ?? [:]
     }
 
+    /// Skins (`.wsz`/`.zip` files and folders) in `directories`, sorted by name.
+    /// A later directory wins on duplicate names, so user skins override bundled ones.
+    public static func available(in directories: [URL]) -> [(name: String, url: URL)] {
+        var skins: [String: URL] = [:]
+        for directory in directories {
+            let items = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil,
+                                                                      options: .skipsHiddenFiles)) ?? []
+            for item in items {
+                let isDirectory = (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                guard isDirectory || ["wsz", "zip"].contains(item.pathExtension.lowercased()) else { continue }
+                skins[item.deletingPathExtension().lastPathComponent] = item
+            }
+        }
+        return skins.sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { (name: $0.key, url: $0.value) }
+    }
+
     /// Finds the letters A–Z in gen.bmp's font row (y = 88): glyphs are runs of columns
-    /// that differ from the separator color, which is sampled at (25, 0).
+    /// that differ from the separator color, which is sampled at the row's first column.
     static func parseGenFont(_ image: CGImage) -> [Character: CGRect] {
         let width = image.width, height = image.height
-        guard width > 25, height >= 95,
+        guard width > 0, height >= 95,
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
@@ -65,7 +84,7 @@ public struct Skin {
         let pixels = data.bindMemory(to: UInt32.self, capacity: width * height)
         // The context's memory starts with the top row, matching gen.bmp's coordinates.
         func pixel(_ x: Int, _ y: Int) -> UInt32 { pixels[y * width + x] }
-        let separator = pixel(25, 0)
+        let separator = pixel(0, 88)
 
         var font: [Character: CGRect] = [:]
         var letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ").makeIterator()

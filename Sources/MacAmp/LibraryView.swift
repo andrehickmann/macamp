@@ -4,10 +4,19 @@ import MacAmpCore
 /// The media library: a gen.bmp window frame around native lists colored like the skin's playlist.
 @MainActor
 final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
-    private enum SidebarItem: Equatable {
+    private enum SidebarItem: Hashable {
         case header(String)
         case view(Library.View)
         case playlist(Int)
+        case spotifyConnect, spotifyLiked, spotifySearch
+        case spotifyPlaylist(String)
+
+        var isSpotify: Bool {
+            switch self {
+            case .spotifyLiked, .spotifySearch, .spotifyPlaylist: true
+            default: false
+            }
+        }
     }
 
     private enum Control { case close, resize }
@@ -30,6 +39,11 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     private var pressed: Control?
     private var resizeStart: (mouse: CGPoint, size: CGSize)?
     private var didPlaceDivider = false
+    /// Spotify rows per sidebar item, loaded on first selection.
+    private var spotifyRows: [SidebarItem: [LibraryTrack]] = [:]
+    private var spotifyTask: Task<Void, Never>?
+    /// Spotify playlists whose tracks the API withholds (not owned by the user); Play starts them in Spotify.
+    private var closedPlaylists: Set<String> = []
 
     override init(app: AppController) {
         super.init(app: app)
@@ -48,12 +62,16 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     // MARK: Content
 
     private func buildContent() {
+        // Start at the final size: a zero-sized split view logs layout warnings.
+        split.frame = contentRect
         split.isVertical = true
         split.dividerStyle = .thin
         split.appearance = NSAppearance(named: .darkAqua)
         addSubview(split)
 
-        sidebar.addTableColumn(NSTableColumn(identifier: .init("name")))
+        let sidebarColumn = NSTableColumn(identifier: .init("name"))
+        sidebarColumn.resizingMask = .autoresizingMask
+        sidebar.addTableColumn(sidebarColumn)
         sidebar.headerView = nil
         split.addSubview(scrollView(for: sidebar, width: 130))
 
@@ -110,6 +128,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
         let scroll = NSScrollView(frame: CGRect(x: 0, y: 0, width: width, height: 300))
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.hasHorizontalScroller = table === tracksTable
         scroll.borderType = .noBorder
         return scroll
@@ -118,6 +137,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     override func layout() {
         super.layout()
         split.frame = contentRect
+        sidebar.tableColumns.first?.width = max(60, sidebar.enclosingScrollView?.contentSize.width ?? 115)
         if !didPlaceDivider {
             didPlaceDivider = true
             split.setPosition(130, ofDividerAt: 0)
@@ -143,8 +163,12 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     /// Rebuilds the sidebar and the visible rows after the library changed.
     func libraryChanged() {
         let library = app.library
+        let spotify: [SidebarItem] = app.spotify.isConnected
+            ? [.spotifyLiked, .spotifySearch] + app.spotifyPlaylists.map { .spotifyPlaylist($0.id) }
+            : [.spotifyConnect]
         sidebarItems = [.header("Local Media")] + Library.View.allCases.map { .view($0) } + [.header("Playlists")]
-            + library.playlists.indices.map { .playlist($0) }
+            + library.playlists.indices.map { .playlist($0) } + [.header("Spotify")] + spotify
+        if !app.spotify.isConnected { spotifyRows = [:] }
         if !sidebarItems.contains(selected) { selected = .view(.audio) }
         sidebar.reloadData()
         if let row = sidebarItems.firstIndex(of: selected) { sidebar.selectRowIndexes([row], byExtendingSelection: false) }
@@ -152,6 +176,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func reloadRows() {
+        if selected.isSpotify { return loadSpotifyRows(selected) }
         let library = app.library
         let unsorted: [LibraryTrack] = switch selected {
         case .view(let view):
@@ -173,10 +198,58 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
         updateStatus()
     }
 
+    /// Shows cached Spotify rows (filtered by the search field) or fetches them; "Search" queries Spotify itself.
+    private func loadSpotifyRows(_ item: SidebarItem) {
+        let query = search.stringValue
+        if case .spotifyPlaylist(let id) = item, closedPlaylists.contains(id) {
+            rows = []
+            tracksTable.reloadData()
+            return updateStatus()
+        }
+        if item != .spotifySearch, let cached = spotifyRows[item] {
+            rows = sorted(Library.filter(cached, query: query))
+            tracksTable.reloadData()
+            return updateStatus()
+        }
+        rows = []
+        tracksTable.reloadData()
+        spotifyTask?.cancel()
+        guard item != .spotifySearch || !query.trimmingCharacters(in: .whitespaces).isEmpty else { return updateStatus() }
+        status.stringValue = "Loading from Spotify…"
+        spotifyTask = Task {
+            if item == .spotifySearch { try? await Task.sleep(for: .milliseconds(400)) }
+            guard !Task.isCancelled else { return }
+            do {
+                let tracks: [LibraryTrack] = switch item {
+                case .spotifyLiked: try await app.spotify.likedSongs()
+                case .spotifySearch: try await app.spotify.search(query)
+                case .spotifyPlaylist(let id): try await app.spotify.tracks(ofPlaylist: id)
+                default: []
+                }
+                guard !Task.isCancelled, selected == item else { return }
+                if item != .spotifySearch { spotifyRows[item] = tracks }
+                rows = sorted(item == .spotifySearch ? tracks : Library.filter(tracks, query: search.stringValue))
+                tracksTable.reloadData()
+                updateStatus()
+            } catch SpotifyError.http(403, _) where { if case .spotifyPlaylist = item { true } else { false } }() {
+                guard case .spotifyPlaylist(let id) = item, !Task.isCancelled else { return }
+                closedPlaylists.insert(id)
+                updateStatus()
+            } catch {
+                guard !Task.isCancelled else { return }
+                status.stringValue = "Spotify: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func updateStatus() {
         let total = rows.reduce(0) { $0 + ($1.duration ?? 0) }
         var text = "\(rows.count) items [\(TimeDisplay.string(seconds: total))]"
-        if app.library.folders.isEmpty { text = "Use “Add Folder…” to build your library" }
+        if app.library.folders.isEmpty, case .view = selected { text = "Use “Add Folder…” to build your library" }
+        if selected == .spotifySearch, rows.isEmpty { text = "Type to search Spotify" }
+        if case .spotifyPlaylist(let id) = selected, closedPlaylists.contains(id) {
+            text = "Spotify only lists tracks of your own playlists – Play starts it in Spotify"
+        }
         if let scan = app.libraryScanStatus { text += "  –  \(scan)" }
         status.stringValue = text
         status.textColor = NSColor(cgColor: skin.playlistStyle.normal) ?? .green
@@ -257,6 +330,14 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
                 cell.stringValue = "  " + view.title
             case .playlist(let index):
                 cell.stringValue = "  " + (app.library.playlists[safe: index]?.name ?? "")
+            case .spotifyConnect:
+                cell.stringValue = "  Connect Spotify…"
+            case .spotifyLiked:
+                cell.stringValue = "  Liked Songs"
+            case .spotifySearch:
+                cell.stringValue = "  Search"
+            case .spotifyPlaylist(let id):
+                cell.stringValue = "  " + (app.spotifyPlaylists.first { $0.id == id }?.name ?? "")
             }
         } else {
             let track = rows[row]
@@ -269,6 +350,10 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard notification.object as? NSTableView === sidebar, sidebar.selectedRow >= 0 else { return }
+        if sidebarItems[sidebar.selectedRow] == .spotifyConnect {
+            sidebar.selectRowIndexes(IndexSet(sidebarItems.firstIndex(of: selected).map { [$0] } ?? []), byExtendingSelection: false)
+            return app.toggleSpotifyConnection()
+        }
         selected = sidebarItems[sidebar.selectedRow]
         reloadRows()
     }
@@ -292,11 +377,17 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func searchChanged() { reloadRows() }
-    @objc private func playSelection() { app.playLibraryTracks(targetTracks) }
+    @objc private func playSelection() {
+        if case .spotifyPlaylist(let id) = selected, closedPlaylists.contains(id),
+           let playlist = app.spotifyPlaylists.first(where: { $0.id == id }) {
+            return app.playSpotifyPlaylist(playlist.uri)
+        }
+        app.playLibraryTracks(targetTracks)
+    }
     @objc private func enqueueSelection() { app.enqueueLibraryTracks(targetTracks) }
     @objc private func addFolder() { app.addLibraryFolder() }
     @objc private func rescan() { app.rescanLibrary() }
-    @objc private func showInFinder() { NSWorkspace.shared.activateFileViewerSelecting(targetTracks.map(\.url)) }
+    @objc private func showInFinder() { NSWorkspace.shared.activateFileViewerSelecting(targetTracks.map(\.url).filter(\.isFileURL)) }
     @objc private func removeFromLibrary() { app.removeFromLibrary(targetTracks.map(\.url)) }
     @objc private func rate(_ sender: NSMenuItem) { app.rate(targetTracks.map(\.url), stars: sender.tag) }
 

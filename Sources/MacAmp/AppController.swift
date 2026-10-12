@@ -1,18 +1,26 @@
 import AppKit
+import AuthenticationServices
 import AVFoundation
 import MacAmpCore
 import UniformTypeIdentifiers
 
 /// Owns the player, the playlist, the three skinned windows and the persisted settings.
 @MainActor
-final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     struct TrackInfo {
         let kbps: Int
         let kHz: Int
     }
 
     let player = Player()
+    let spotify = SpotifyClient()
+    /// The source the windows control.
+    var transport: any Transport { spotify.isActive ? spotify : player }
+    private(set) var spotifyPlaylists: [SpotifyPlaylist] = []
+    /// Playlist index of the first track of the run handed to Spotify.
+    private var spotifyRunStart = 0
     private(set) var skin: Skin!
+    private var skinURL: URL?
     var playlist = Playlist() {
         didSet {
             playlistView?.needsDisplay = true
@@ -29,8 +37,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     var shuffle = false
     var repeatAll = false
     private(set) var trackInfo: TrackInfo?
-    /// "[Connecting]" and similar while a radio stream has no title yet.
-    private(set) var streamStatus: String?
+    /// "[Connecting]" and similar while a stream or Spotify has no title yet.
+    private(set) var statusMessage: String?
     private(set) var mainShade = false
     private(set) var equalizerShade = false
     private(set) var playlistShade = false
@@ -58,7 +66,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var isApplyingAutoPreset = false
     private var launched = false
     private var pendingFiles: [URL] = []
-    private var pendingSkin: URL?
     private var tick = 0
 
     private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow].compactMap { $0 } }
@@ -67,8 +74,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     var libraryVisible: Bool { libraryWindow?.isVisible ?? false }
     /// Snapshot runs must not touch the user's settings, window positions or library.
     private var isSnapshotRun: Bool { UserDefaults.standard.string(forKey: "snapshot") != nil }
-    private static let libraryFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("MacAmp/library.json")
+    private static let supportFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("MacAmp")
+    private static let libraryFile = supportFolder.appendingPathComponent("library.json")
+    /// Skins the user added; they show up in the Skins menu next to the bundled ones.
+    private static let userSkinsFolder = supportFolder.appendingPathComponent("Skins")
+    /// Bundled skins (Contents/Resources/Skins in the app, Resources/Skins under `swift run`), then the user's.
+    private static let skinFolders: [URL] = [
+        Bundle.main.resourceURL?.appendingPathComponent("Skins"),
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Resources/Skins").standardized,
+        userSkinsFolder,
+    ].compactMap { $0 }
 
     // MARK: Lifecycle
 
@@ -117,10 +133,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         player.onTrackEnd = { [weak self] in self?.trackEnded() }
         player.onChange = { [weak self] in self?.nowPlaying?.update() }
         player.onStreamTitle = { [weak self] title in self?.streamTitleChanged(title) }
+        spotify.onChange = { [weak self] in
+            self?.refreshViews()
+            self?.nowPlaying?.update()
+        }
+        spotify.onRunIndex = { [weak self] offset in self?.spotifyRunMoved(to: offset) }
+        spotify.onRunFinished = { [weak self] in self?.trackEnded() }
+        spotify.onStartFailed = { [weak self] in
+            self?.statusMessage = "[Spotify did not start playback – try playing once in the Spotify app]"
+            self?.refreshViews()
+        }
+        if spotify.isConnected { loadSpotifyPlaylists() }
         player.onStreamInfo = { [weak self] info in self?.streamInfoChanged(info) }
         player.onStreamFailure = { [weak self] message in
             NSLog("MacAmp: stream failed: \(message)")
-            self?.streamStatus = "[\(message)]"
+            self?.statusMessage = "[\(message)]"
         }
         player.apply(self.equalizer)
         loadInfo(for: self.playlist.entries)
@@ -146,18 +173,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         saveLibrary()
     }
 
-    /// Files opened from Finder; skins are applied, everything else replaces the playlist.
+    /// Files opened from Finder replace the playlist; skins are added and applied.
     func application(_ application: NSApplication, open urls: [URL]) {
-        let skins = urls.filter { $0.pathExtension.lowercased() == "wsz" }
-        let media = urls.filter { $0.pathExtension.lowercased() != "wsz" }
-        if let skinURL = skins.last {
-            if launched, let skin = try? Skin(contentsOf: skinURL) {
-                setSkin(skin, from: skinURL)
-            } else {
-                pendingSkin = skinURL
-            }
-        }
-        if !media.isEmpty { open(media, replacing: true) }
+        open(urls, replacing: true)
     }
 
     private func animate() {
@@ -169,7 +187,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     // MARK: Playlist and playback
 
     /// Adds files, folders and playlist files; `replacing` starts a new list and plays it.
+    /// `.wsz` skins are added to the Skins menu and applied right away, even before launch.
     func open(_ urls: [URL], replacing: Bool) {
+        if let skinURL = urls.last(where: Self.isSkinFile) { addSkin(skinURL) }
+        let urls = urls.filter { !Self.isSkinFile($0) }
+        guard !urls.isEmpty else { return }
         guard launched else {
             pendingFiles += urls
             return
@@ -193,9 +215,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     /// "1. Artist - Title (3:45)" as shown in the main window; streams show no length.
     var marqueeText: String {
+        if spotify.isActive, !spotify.isFollowingRun, let item = spotify.playback?.item?.libraryTrack {
+            return "\(item.displayTitle) (\(TimeDisplay.string(seconds: item.duration ?? 0)))"
+        }
         guard let current = playlist.current, playlist.entries.indices.contains(current) else { return "MACAMP" }
         let entry = playlist.entries[current]
-        if let streamStatus { return "\(current + 1). \(streamStatus)" }
+        if let statusMessage { return "\(current + 1). \(statusMessage)" }
         guard let duration = entry.duration ?? (player.file != nil ? player.duration : nil) else {
             return "\(current + 1). \(entry.displayTitle)"
         }
@@ -203,6 +228,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     }
 
     func play() {
+        if spotify.isActive, spotify.state == .paused { return spotify.resume() }
         if (player.file == nil && player.streamURL == nil) || playlist.current == nil {
             playTrack(at: playlist.current ?? playlist.selection.first ?? 0)
         } else {
@@ -211,10 +237,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     }
 
     func next() {
+        if spotify.isActive, !spotify.isFollowingRun { return spotify.skip(forward: true) }
         if let index = playlist.index(after: playlist.current, shuffle: shuffle, repeatAll: true) { playTrack(at: index) }
     }
 
     func previous() {
+        if spotify.isActive, !spotify.isFollowingRun { return spotify.skip(forward: false) }
         if let index = playlist.index(before: playlist.current, repeatAll: true) { playTrack(at: index) }
     }
 
@@ -228,7 +256,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         guard playlist.entries.indices.contains(index) else { return }
         playlist.current = index
         let url = playlist.entries[index].url
-        streamStatus = nil
+        statusMessage = nil
+        if url.scheme == "spotify" { return playSpotify(at: index) }
+        spotify.release()
         guard url.isFileURL else { return playStream(url, at: index) }
         do {
             try player.load(url)
@@ -248,10 +278,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         nowPlaying?.update()
     }
 
+    /// Hands this entry and the Spotify entries directly after it to Spotify (one entry when shuffling).
+    private func playSpotify(at index: Int) {
+        player.stop()
+        trackInfo = nil
+        guard spotify.isConnected else {
+            statusMessage = "[Spotify not connected]"
+            return
+        }
+        let uris = playlist.entries[index...].prefix { $0.url.scheme == "spotify" }.prefix(shuffle ? 1 : 100).map(\.url.absoluteString)
+        spotifyRunStart = index
+        statusMessage = "[Connecting to Spotify]"
+        Task {
+            do {
+                try await spotify.play(uris: uris)
+                statusMessage = nil
+            } catch {
+                statusMessage = "[Spotify: \(error.localizedDescription)]"
+            }
+            refreshViews()
+        }
+    }
+
+    private func spotifyRunMoved(to offset: Int) {
+        let index = spotifyRunStart + offset
+        guard playlist.entries.indices.contains(index), playlist.current != index else { return }
+        playlist.current = index
+        library.recordPlay(of: playlist.entries[index].url)
+    }
+
     private func playStream(_ url: URL, at index: Int) {
         player.stop()
         trackInfo = nil
-        streamStatus = "[Connecting]"
+        statusMessage = "[Connecting]"
         Task {
             let resolved = await Self.resolveStream(url)
             guard playlist.current == index, playlist.entries.indices.contains(index), playlist.entries[index].url == url else { return }
@@ -269,7 +328,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     }
 
     private func streamTitleChanged(_ title: String) {
-        streamStatus = nil
+        statusMessage = nil
         if let current = playlist.current, playlist.entries.indices.contains(current) { playlist.entries[current].title = title }
         nowPlaying?.update()
     }
@@ -282,18 +341,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
            playlist.entries[current].title == nil {
             playlist.entries[current].title = name
         }
-        if info.sampleRate != nil, streamStatus == "[Connecting]" { streamStatus = nil }
+        if info.sampleRate != nil, statusMessage == "[Connecting]" { statusMessage = nil }
     }
 
     func handle(_ command: NowPlaying.Command) {
         switch command {
         case .play: play()
-        case .pause: if player.state == .playing { player.pause() }
-        case .toggle: player.state == .stopped ? play() : player.pause()
-        case .stop: player.stop()
+        case .pause: if transport.state == .playing { transport.pause() }
+        case .toggle: transport.state == .stopped ? play() : transport.pause()
+        case .stop: transport.stop()
         case .next: next()
         case .previous: previous()
-        case .seek(let seconds): player.seek(to: seconds)
+        case .seek(let seconds): transport.seek(to: seconds)
         }
         refreshViews()
     }
@@ -567,6 +626,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
     }
 
+    // MARK: Spotify
+
+    @objc func toggleSpotifyConnection() {
+        if spotify.isConnected {
+            spotify.disconnect()
+            spotifyPlaylists = []
+            libraryView?.libraryChanged()
+            return
+        }
+        Task {
+            do {
+                try await spotify.connect()
+                loadSpotifyPlaylists()
+            } catch {
+                if (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin { return }
+                NSAlert(error: error).runModal()
+            }
+        }
+    }
+
+    func playSpotifyPlaylist(_ uri: String) {
+        player.stop()
+        trackInfo = nil
+        Task {
+            do {
+                try await spotify.play(context: uri)
+            } catch {
+                statusMessage = "[Spotify: \(error.localizedDescription)]"
+            }
+            refreshViews()
+        }
+    }
+
+    private func loadSpotifyPlaylists() {
+        Task {
+            do {
+                spotifyPlaylists = try await spotify.playlists()
+            } catch {
+                NSLog("MacAmp: loading Spotify playlists failed: \(error.localizedDescription)")
+            }
+            libraryView?.libraryChanged()
+        }
+    }
+
     // MARK: Main window actions and keys
 
     func perform(_ control: MainWindowView.Control, event: NSEvent, in view: NSView) {
@@ -577,8 +680,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         case .shade: toggleMainShade()
         case .previous: previous()
         case .play: play()
-        case .pause: player.pause()
-        case .stop: player.stop()
+        case .pause: transport.pause()
+        case .stop: transport.stop()
         case .next: next()
         case .eject: openFiles()
         case .shuffle: shuffle.toggle()
@@ -596,18 +699,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         switch event.charactersIgnoringModifiers?.lowercased() {
         case "z": previous()
         case "x": play()
-        case "c": player.pause()
-        case "v": player.stop()
+        case "c": transport.pause()
+        case "v": transport.stop()
         case "b": next()
         case "l": openFiles()
         case "r": repeatAll.toggle()
         case "s": shuffle.toggle()
         default:
             switch Int(event.keyCode) {
-            case 123: player.seek(to: player.currentTime - 5)
-            case 124: player.seek(to: player.currentTime + 5)
-            case 125: player.volume = max(0, player.volume - 0.05)
-            case 126: player.volume = min(1, player.volume + 0.05)
+            case 123: transport.seek(to: transport.currentTime - 5)
+            case 124: transport.seek(to: transport.currentTime + 5)
+            case 125: transport.volume = max(0, transport.volume - 0.05)
+            case 126: transport.volume = min(1, transport.volume + 0.05)
             default: return false
             }
         }
@@ -673,12 +776,49 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     // MARK: Skins
 
+    private static func isSkinFile(_ url: URL) -> Bool { url.pathExtension.lowercased() == "wsz" }
+
     @objc func chooseSkin() {
-        if let (skin, url) = pickSkin() { setSkin(skin, from: url) }
+        if let url = pickSkinFile() { addSkin(url) }
+    }
+
+    @objc private func selectSkin(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        do {
+            setSkin(try Skin(contentsOf: url), from: url)
+        } catch {
+            showSkinError(error, for: url)
+        }
+    }
+
+    @objc private func showSkinsFolder() {
+        try? FileManager.default.createDirectory(at: Self.userSkinsFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Self.userSkinsFolder)
+    }
+
+    /// Copies a valid skin into the user's skins folder and applies it.
+    func addSkin(_ url: URL) {
+        do {
+            let skin = try Skin(contentsOf: url)
+            setSkin(skin, from: try installSkin(url))
+        } catch {
+            showSkinError(error, for: url)
+        }
+    }
+
+    /// Copies a skin file or folder into the user's skins folder, replacing one with the same name.
+    private func installSkin(_ url: URL) throws -> URL {
+        let target = Self.userSkinsFolder.appendingPathComponent(url.lastPathComponent)
+        guard url.standardizedFileURL.path != target.standardizedFileURL.path else { return url }
+        try FileManager.default.createDirectory(at: Self.userSkinsFolder, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: target)
+        try FileManager.default.copyItem(at: url, to: target)
+        return target
     }
 
     private func setSkin(_ skin: Skin, from url: URL) {
         self.skin = skin
+        skinURL = url
         UserDefaults.standard.set(url.path, forKey: "skinPath")
         libraryView?.applySkinColors()
         for window in skinWindows {
@@ -687,36 +827,59 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
     }
 
+    /// A skin opened from Finder before launch, else the saved one, else the first available; asks only when there is none.
     private func loadInitialSkin() -> Skin? {
+        if let skin { return skin }
         let saved = UserDefaults.standard.string(forKey: "skinPath").map { URL(fileURLWithPath: $0) }
-        for candidate in [pendingSkin, saved].compactMap({ $0 }) {
+        for candidate in [saved].compactMap({ $0 }) + Skin.available(in: Self.skinFolders).map(\.url) {
             if let skin = try? Skin(contentsOf: candidate) {
-                if candidate == pendingSkin { UserDefaults.standard.set(candidate.path, forKey: "skinPath") }
+                skinURL = candidate
+                if candidate != saved, !isSnapshotRun { UserDefaults.standard.set(candidate.path, forKey: "skinPath") }
                 return skin
             }
         }
-        return pickSkin()?.skin
+        while skin == nil, let url = pickSkinFile() { addSkin(url) }
+        return skin
     }
 
     /// Lets the user choose a .wsz file or an unpacked skin folder.
-    private func pickSkin() -> (skin: Skin, url: URL)? {
+    private func pickSkinFile() -> URL? {
         let panel = NSOpenPanel()
         panel.message = "Choose a classic skin (.wsz file or skin folder)"
         panel.canChooseDirectories = true
         panel.allowedContentTypes = [UTType(filenameExtension: "wsz") ?? .zip, .zip, .folder]
-        while panel.runModal() == .OK, let url = panel.url {
-            do {
-                let skin = try Skin(contentsOf: url)
-                UserDefaults.standard.set(url.path, forKey: "skinPath")
-                return (skin, url)
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "This is not a classic skin."
-                alert.informativeText = "\(url.lastPathComponent) contains no main.bmp."
-                alert.runModal()
-            }
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func showSkinError(_ error: Error, for url: URL) {
+        let alert = NSAlert()
+        if error is SkinError {
+            alert.messageText = "This is not a classic skin."
+            alert.informativeText = "\(url.lastPathComponent) is no .wsz archive or folder with a main.bmp."
+        } else {
+            alert.messageText = "The skin could not be added."
+            alert.informativeText = error.localizedDescription
         }
-        return nil
+        alert.runModal()
+    }
+
+    /// Fills the Skins submenu each time it opens, so newly added skins appear.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for (name, url) in Skin.available(in: Self.skinFolders) {
+            let item = addItem(to: menu, name, #selector(selectSkin(_:)))
+            item.representedObject = url
+            item.state = url.path == skinURL?.path ? .on : .off
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
+        addItem(to: menu, "Add Skin…", #selector(chooseSkin))
+        addItem(to: menu, "Show Skins Folder", #selector(showSkinsFolder))
+    }
+
+    private func addSkinsMenu(to menu: NSMenu) {
+        let skins = NSMenu(title: "Skins")
+        skins.delegate = self
+        menu.addItem(withTitle: skins.title, action: nil, keyEquivalent: "").submenu = skins
     }
 
     // MARK: Menus
@@ -731,7 +894,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         addItem(to: fileMenu, "Open File…", #selector(openFiles), key: "o")
         addItem(to: fileMenu, "Open Folder…", #selector(openFolder), key: "O")
         addItem(to: fileMenu, "Open URL…", #selector(openURL), key: "l")
-        addItem(to: fileMenu, "Load Skin…", #selector(chooseSkin))
+        addSkinsMenu(to: fileMenu)
+        fileMenu.addItem(.separator())
+        addItem(to: fileMenu, "Connect Spotify…", #selector(toggleSpotifyConnection))
 
         let windowMenu = NSMenu(title: "Window")
         addWindowItems(to: windowMenu)
@@ -748,7 +913,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         addItem(to: menu, "Open File…", #selector(openFiles))
         addItem(to: menu, "Open Folder…", #selector(openFolder))
         addItem(to: menu, "Open URL…", #selector(openURL))
-        addItem(to: menu, "Load Skin…", #selector(chooseSkin))
+        addSkinsMenu(to: menu)
         menu.addItem(.separator())
         addWindowItems(to: menu)
         menu.addItem(.separator())
@@ -795,6 +960,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         default: nil
         }
         if let on { menuItem.state = on ? .on : .off }
+        if menuItem.action == #selector(toggleSpotifyConnection) {
+            menuItem.title = spotify.isConnected ? "Disconnect Spotify" : "Connect Spotify…"
+        }
         return true
     }
 

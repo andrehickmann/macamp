@@ -1,3 +1,5 @@
 .build/
 .swiftpm/
 *.wsz
+!Resources/Skins/*.wsz
+.claude/

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacAmp</title>
+<meta name="description" content="A native macOS player that recreates the classic 2.x skinned player and loads classic .wsz skins. Free and open source.">
+<meta property="og:title" content="MacAmp">
+<meta property="og:description" content="Classic skins, native on macOS. Free and open source.">
+<meta property="og:image" content="screenshot.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=VT323&family=Schibsted+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --page: #14142a;
+  --chrome-hi: #6a6a92;
+  --chrome: #3a3a5c;
+  --chrome-2: #2a2a46;
+  --chrome-lo: #0d0d1a;
+  --lcd-bg: #000;
+  --lcd: #1cf21c;
+  --lcd-dim: #0f5f0f;
+  --gold: #e3d39a;
+  --orange: #e89a2e;
+  --select: #0b2fc4;
+  --text: #dcdcea;
+  --muted: #9a9abb;
+  --key: #c9c9d6;
+  --key-lo: #6e6e86;
+  --pixel: "Silkscreen", monospace;
+  --lcd-font: "VT323", monospace;
+  --body: "Schibsted Grotesk", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  color: var(--text);
+  font: 17px/1.6 var(--body);
+  background:
+    radial-gradient(1200px 600px at 75% -10%, #2c2c5a 0%, transparent 60%),
+    radial-gradient(900px 500px at -10% 40%, #1d2a3a 0%, transparent 60%),
+    var(--page);
+  overflow-x: hidden;
+}
+body::before { /* CRT scanlines */
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px);
+  mix-blend-mode: multiply;
+}
+a { color: inherit; }
+img { max-width: 100%; display: block; }
+.wrap { width: min(1120px, 100% - 32px); margin-inline: auto; }
+
+/* Beveled chrome, like a skinned window frame */
+.bevel {
+  background: linear-gradient(180deg, var(--chrome) 0%, var(--chrome-2) 100%);
+  box-shadow: inset 1px 1px 0 var(--chrome-hi), inset -1px -1px 0 var(--chrome-lo), 0 20px 50px -20px #000;
+}
+.titlebar {
+  display: flex; align-items: center; gap: 12px;
+  font: 700 12px/1 var(--pixel); letter-spacing: .12em; color: var(--gold);
+  padding: 7px 10px; text-transform: uppercase;
+}
+.titlebar .groove {
+  flex: 1; height: 8px;
+  background: repeating-linear-gradient(180deg, #8f8a6a 0 1px, transparent 1px 3px);
+  opacity: .7;
+}
+.lcd {
+  background: var(--lcd-bg); color: var(--lcd);
+  font-family: var(--lcd-font);
+  box-shadow: inset 1px 1px 0 var(--chrome-lo), inset -1px -1px 0 var(--chrome-hi);
+  text-shadow: 0 0 6px rgba(28,242,28,.45);
+}
+
+/* Navigation */
+.nav { position: sticky; top: 0; z-index: 40; padding-top: 10px; }
+.nav .bevel { display: flex; align-items: center; gap: 12px; padding: 4px 6px 4px 12px; }
+.nav .brand { display: flex; align-items: center; gap: 8px; font: 700 13px var(--pixel); color: var(--gold); text-decoration: none; letter-spacing: .1em; }
+.nav .groove { flex: 1; height: 8px; background: repeating-linear-gradient(180deg, #8f8a6a 0 1px, transparent 1px 3px); opacity: .6; }
+.nav nav { display: flex; gap: 4px; }
+.nav nav a {
+  font: 400 11px var(--pixel); text-decoration: none; color: var(--text);
+  padding: 6px 10px; letter-spacing: .06em;
+}
+.nav nav a:hover { color: var(--lcd); }
+@media (max-width: 640px) { .nav nav a.opt { display: none; } }
+
+/* Buttons */
+.btn {
+  --b: var(--chrome);
+  display: inline-flex; align-items: center; gap: 10px;
+  font: 700 14px var(--pixel); letter-spacing: .06em; text-transform: uppercase; text-decoration: none;
+  padding: 14px 20px; color: #0b0b16;
+  background: linear-gradient(180deg, #e6e6f0, #a9a9be);
+  box-shadow: inset 2px 2px 0 #fff, inset -2px -2px 0 var(--key-lo), 0 6px 0 -2px var(--chrome-lo);
+  transition: transform .08s, box-shadow .08s;
+}
+.btn:active { transform: translateY(2px); box-shadow: inset -2px -2px 0 #fff, inset 2px 2px 0 var(--key-lo); }
+.btn.primary { color: #021a02; background: linear-gradient(180deg, #74ff74, #1cc41c); box-shadow: inset 2px 2px 0 #c8ffc8, inset -2px -2px 0 #0a6a0a, 0 0 30px -4px rgba(28,242,28,.55); }
+.btn:focus-visible, a:focus-visible { outline: 2px dashed var(--lcd); outline-offset: 3px; }
+.btn svg { width: 14px; height: 14px; }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: 1.1fr .9fr; gap: 48px; align-items: center; padding: 72px 0 56px; }
+.kicker { font: 400 12px var(--pixel); color: var(--orange); letter-spacing: .14em; text-transform: uppercase; margin: 0 0 18px; }
+h1 {
+  font: 700 clamp(40px, 6.4vw, 78px)/1.02 var(--pixel); margin: 0 0 24px; letter-spacing: -.01em;
+  color: #f2f2fa; text-shadow: 3px 3px 0 #000;
+}
+h1 em { font-style: normal; color: var(--lcd); text-shadow: 3px 3px 0 #000, 0 0 24px rgba(28,242,28,.5); }
+.lede { font-size: 19px; color: var(--muted); max-width: 52ch; margin: 0 0 32px; }
+.lede strong { color: var(--text); font-weight: 500; }
+.cta { display: flex; flex-wrap: wrap; gap: 14px; }
+.meta { font: 22px/1 var(--lcd-font); color: var(--lcd-dim); margin-top: 22px; letter-spacing: .02em; }
+.meta b { color: var(--lcd); font-weight: 400; }
+
+.stage { position: relative; min-height: 520px; }
+.stage .main { position: relative; z-index: 2; width: 300px; margin-left: auto; margin-right: 0; filter: drop-shadow(0 30px 40px rgba(0,0,0,.7)); transform: rotate(-2deg); }
+.stage .lib { position: absolute; z-index: 1; width: 400px; left: -110px; bottom: 24px; opacity: .9; filter: drop-shadow(0 30px 40px rgba(0,0,0,.7)) saturate(.9); transform: rotate(3deg); }
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; padding-top: 40px; }
+  .stage { min-height: 0; display: flex; justify-content: center; }
+  .stage .main { margin: 0; width: min(275px, 80%); transform: none; }
+  .stage .lib { display: none; }
+}
+
+/* Load-in */
+@media (prefers-reduced-motion: no-preference) {
+  .rise { animation: rise .7s cubic-bezier(.2,.8,.2,1) both; }
+  .d1 { animation-delay: .08s; } .d2 { animation-delay: .16s; } .d3 { animation-delay: .24s; } .d4 { animation-delay: .4s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(18px); } }
+}
+
+/* LCD ticker */
+.ticker { display: grid; grid-template-columns: auto 1fr; margin: 8px 0 96px; }
+.ticker .bars { display: flex; align-items: flex-end; gap: 3px; padding: 10px 14px; height: 56px; border-right: 1px solid #1a1a2a; }
+.ticker .bars i { width: 5px; height: 30%; background: linear-gradient(0deg, var(--lcd) 0%, #d8ff2a 70%, var(--orange) 100%); }
+@media (prefers-reduced-motion: no-preference) {
+  .ticker .bars i { animation: eq 1s ease-in-out infinite alternate; }
+  @keyframes eq { 0% { height: 15%; } 50% { height: 90%; } 100% { height: 40%; } }
+}
+.ticker .run { overflow: hidden; white-space: nowrap; font-size: 30px; display: flex; align-items: center; }
+.ticker .run span { display: inline-block; padding-left: 100%; }
+@media (prefers-reduced-motion: no-preference) {
+  .ticker .run span { animation: marquee 32s linear infinite; }
+  @keyframes marquee { to { transform: translateX(-100%); } }
+}
+@media (prefers-reduced-motion: reduce) { .ticker .run span { padding-left: 16px; } }
+
+/* Sections */
+section { margin-bottom: 110px; }
+.sec-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 28px; flex-wrap: wrap; }
+h2 { font: 700 clamp(26px, 3.6vw, 40px)/1.1 var(--pixel); margin: 0; color: #f2f2fa; text-shadow: 2px 2px 0 #000; }
+.sec-head p { margin: 0; color: var(--muted); }
+
+/* Features as a playlist window */
+.playlist .body { margin: 0 6px; padding: 10px 0; }
+.playlist ol { list-style: none; margin: 0; padding: 0; counter-reset: track; }
+.playlist li {
+  counter-increment: track;
+  display: grid; grid-template-columns: 2.5em 1fr auto; gap: 4px 12px; align-items: baseline;
+  padding: 10px 16px; cursor: default; color: var(--lcd);
+}
+.playlist li::before { content: counter(track) "."; font: 26px/1 var(--lcd-font); text-align: right; }
+.playlist li h3 { margin: 0; font: 26px/1.1 var(--lcd-font); letter-spacing: .02em; font-weight: 400; }
+.playlist li .tag { font: 22px/1 var(--lcd-font); color: var(--lcd-dim); }
+.playlist li p { grid-column: 2 / 4; margin: 2px 0 0; font: 15px/1.5 var(--body); color: #8fbf8f; text-shadow: none; }
+.playlist li:hover, .playlist li:focus-within { background: var(--select); color: #fff; }
+.playlist li:hover p { color: #d8defc; }
+.playlist li:hover .tag { color: #aab8ff; }
+.playlist li.now { color: #fff; }
+.playlist .foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; }
+.playlist .foot .lcd { padding: 4px 10px; font-size: 20px; }
+.playlist .foot .chips { display: flex; gap: 4px; }
+.chip { font: 700 10px var(--pixel); color: #0b0b16; padding: 5px 7px; background: linear-gradient(180deg, #d6d6e2, #9a9ab2); box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 var(--key-lo); }
+
+/* Library split */
+.split { display: grid; grid-template-columns: .9fr 1.1fr; gap: 56px; align-items: center; }
+.split ul { padding: 0; list-style: none; margin: 24px 0 0; }
+.split li { padding: 10px 0 10px 28px; position: relative; border-top: 1px dashed #33335a; color: var(--muted); }
+.split li::before { content: "▶"; position: absolute; left: 0; top: 11px; font-size: 12px; color: var(--lcd); }
+.split li b { color: var(--text); font-weight: 500; }
+.shot { padding: 6px; }
+.shot img { box-shadow: 0 0 0 1px #000; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+
+/* Keyboard */
+.keys { display: flex; gap: 14px; flex-wrap: wrap; }
+.key { width: 92px; text-align: center; }
+.cap {
+  display: grid; place-items: center; height: 76px; margin-bottom: 10px;
+  font: 700 28px var(--pixel); color: #1a1a28;
+  background: linear-gradient(180deg, #ececf4, var(--key));
+  box-shadow: inset 3px 3px 0 #fff, inset -3px -3px 0 var(--key-lo), 0 8px 0 #2a2a40, 0 14px 24px rgba(0,0,0,.5);
+  transition: transform .06s, box-shadow .06s, background .06s;
+}
+.key.on .cap { transform: translateY(6px); box-shadow: inset 3px 3px 0 #fff, inset -3px -3px 0 var(--key-lo), 0 2px 0 #2a2a40; background: linear-gradient(180deg, #b8ffb8, #5adc5a); }
+.key span { font: 20px var(--lcd-font); color: var(--muted); }
+.keys-note { margin-top: 26px; color: var(--muted); font-size: 15px; }
+kbd { font: 18px var(--lcd-font); color: var(--lcd); background: #000; padding: 1px 6px; }
+
+/* Install */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; counter-reset: step; }
+.step { padding: 0 0 18px; }
+.step .titlebar { margin-bottom: 14px; }
+.step .content { padding: 0 18px; }
+.step h3 { font: 700 16px var(--pixel); margin: 0 0 8px; color: #f2f2fa; }
+.step p { margin: 0; color: var(--muted); font-size: 15px; }
+.step code, pre { font: 19px/1.35 var(--lcd-font); }
+.step code { color: var(--lcd); background: #000; padding: 1px 5px; }
+pre { margin: 12px 0 0; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; }
+@media (max-width: 900px) { .steps { grid-template-columns: 1fr; } }
+
+/* Final CTA */
+.final { text-align: center; padding: 56px 24px; }
+.final h2 { margin-bottom: 14px; }
+.final p { color: var(--muted); margin: 0 auto 28px; max-width: 48ch; }
+.final .cta { justify-content: center; }
+
+footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid #26264a; }
+footer .row { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+footer a { color: var(--text); }
+footer .fine { margin-top: 14px; font-size: 13px; color: #6f6f90; max-width: 80ch; }
+</style>
+</head>
+<body>
+
+<header class="nav wrap">
+  <div class="bevel">
+    <a class="brand" href="#top" aria-label="MacAmp home">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 14 L6 4 L9 11 L12 6 L16 14" fill="none" stroke="#1cf21c" stroke-width="2.2" stroke-linejoin="bevel"/></svg>
+      MACAMP
+    </a>
+    <span class="groove" aria-hidden="true"></span>
+    <nav aria-label="Main">
+      <a class="opt" href="#features">Features</a>
+      <a class="opt" href="#install">Install</a>
+      <a href="https://github.com/andrehickmann/macamp">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top" class="wrap">
+  <div class="hero">
+    <div>
+      <p class="kicker rise">Free &amp; open source · macOS 14+</p>
+      <h1 class="rise d1">Classic skins.<br><em>Native</em> on your Mac.</h1>
+      <p class="lede rise d2">MacAmp recreates the beloved 2.x‑era skinned player for macOS: main window, equalizer, playlist and media library. <strong>Drop in any classic <code>.wsz</code> skin</strong> and it looks exactly like you remember. Built in Swift on Core Audio.</p>
+      <div class="cta rise d3">
+        <a class="btn primary" href="https://github.com/andrehickmann/macamp/releases/latest/download/MacAmp.zip">
+          <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v8M3 6l4 4 4-4M1 13h12" stroke="currentColor" stroke-width="2.2" fill="none"/></svg>
+          Download for macOS
+        </a>
+        <a class="btn" href="https://github.com/andrehickmann/macamp">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Source on GitHub
+        </a>
+      </div>
+      <p class="meta rise d4"><b>v0.1.0</b> · universal · MIT license</p>
+    </div>
+    <div class="stage rise d2">
+      <img class="lib" src="library.png" width="550" height="348" alt="MacAmp media library window">
+      <img class="main" src="screenshot.png" width="550" height="928" alt="MacAmp main window, equalizer and playlist editor with the classic base skin">
+    </div>
+  </div>
+
+  <div class="ticker bevel" aria-hidden="true">
+    <div class="bars lcd">
+      <i style="animation-delay:-.1s"></i><i style="animation-delay:-.7s"></i><i style="animation-delay:-.3s"></i><i style="animation-delay:-.9s"></i><i style="animation-delay:-.5s"></i><i style="animation-delay:-.2s"></i><i style="animation-delay:-.8s"></i><i style="animation-delay:-.4s"></i><i style="animation-delay:-.6s"></i><i style="animation-delay:-.15s"></i><i style="animation-delay:-.75s"></i><i style="animation-delay:-.35s"></i>
+    </div>
+    <div class="run lcd"><span>*** 1. MACAMP – CLASSIC SKINS, NATIVE ON MACOS *** MP3 · AAC · ALAC · FLAC · OGG VORBIS · OPUS · WAV · AIFF *** SHOUTCAST &amp; ICECAST RADIO *** 10-BAND EQ *** MEDIA KEYS &amp; NOW PLAYING ***</span></div>
+  </div>
+
+  <section id="features">
+    <div class="sec-head">
+      <h2>Now playing</h2>
+      <p>Everything you'd expect, nothing you wouldn't.</p>
+    </div>
+    <div class="playlist bevel">
+      <div class="titlebar"><span class="groove"></span>MacAmp Playlist<span class="groove"></span></div>
+      <div class="body lcd">
+        <ol>
+          <li class="now"><h3>Any classic skin</h3><span class="tag">.WSZ</span><p>Load <code>.wsz</code> files or unpacked skin folders. Shade modes, double size and custom <code>region.txt</code> window shapes included.</p></li>
+          <li><h3>Snapping windows</h3><span class="tag">DOCK</span><p>Main window, equalizer and playlist snap to each other and to screen edges. Drag the main window and docked windows follow.</p></li>
+          <li><h3>10-band equalizer</h3><span class="tag">EQ</span><p>Preamp, presets and per-file "Auto" curves, applied to local files and radio streams alike.</p></li>
+          <li><h3>Playlist editor</h3><span class="tag">PL</span><p>Multi-select, drag to reorder, sort, reverse, randomize, remove missing, resize, and save or load <code>.m3u</code>.</p></li>
+          <li><h3>Internet radio</h3><span class="tag">ICY</span><p>Shoutcast and Icecast streams (MP3/AAC) with live stream titles. Open <code>.pls</code>/<code>.m3u</code> station links directly.</p></li>
+          <li><h3>Media library</h3><span class="tag">ML</span><p>Watched folders, tag scan, search, smart views, ratings, play counts and saved playlists.</p></li>
+          <li><h3>Spectrum analyzer</h3><span class="tag">VIS</span><p>The classic bars, right where they belong, driven by the actual audio.</p></li>
+          <li><h3>A real Mac citizen</h3><span class="tag">MAC</span><p>Media keys, Control Center "Now Playing", drag and drop, and settings that persist across launches.</p></li>
+        </ol>
+      </div>
+      <div class="foot">
+        <div class="chips" aria-hidden="true"><span class="chip">ADD</span><span class="chip">REM</span><span class="chip">SEL</span><span class="chip">MISC</span></div>
+        <div class="lcd">8 features · 0:00/∞</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="split">
+      <div>
+        <h2>Your collection, one window away</h2>
+        <ul>
+          <li><b>Watched folders</b> are scanned for tags and stay up to date.</li>
+          <li><b>Smart views:</b> most played, recently added, never played, top rated.</li>
+          <li><b>Drag to playlist</b> or enqueue straight from search results.</li>
+          <li><b>Spotify</b> (Premium, experimental): browse Liked Songs and playlists from the library.</li>
+        </ul>
+      </div>
+      <div class="shot bevel"><img src="library.png" width="550" height="348" alt="Media library with local media views and a track list" loading="lazy"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>Muscle memory included</h2>
+      <p>Try them here.</p>
+    </div>
+    <div class="keys" id="keys">
+      <div class="key" data-k="z"><div class="cap">Z</div><span>previous</span></div>
+      <div class="key" data-k="x"><div class="cap">X</div><span>play</span></div>
+      <div class="key" data-k="c"><div class="cap">C</div><span>pause</span></div>
+      <div class="key" data-k="v"><div class="cap">V</div><span>stop</span></div>
+      <div class="key" data-k="b"><div class="cap">B</div><span>next</span></div>
+    </div>
+    <p class="keys-note"><kbd>L</kbd> open · <kbd>R</kbd> repeat · <kbd>S</kbd> shuffle · <kbd>←/→</kbd> seek · <kbd>⌥G</kbd> equalizer · <kbd>⌥E</kbd> playlist · <kbd>⌥L</kbd> library · <kbd>⌃W</kbd> shade · <kbd>⌃D</kbd> double size</p>
+  </section>
+
+  <section id="install">
+    <div class="sec-head">
+      <h2>Install in a minute</h2>
+      <p>Requires macOS 14 Sonoma or later.</p>
+    </div>
+    <div class="steps">
+      <div class="step bevel">
+        <div class="titlebar"><span class="groove"></span>Step 1<span class="groove"></span></div>
+        <div class="content">
+          <h3>Download</h3>
+          <p>Grab <code>MacAmp.zip</code> from the <a href="https://github.com/andrehickmann/macamp/releases/latest">latest release</a>, unzip it and move MacAmp to Applications.</p>
+        </div>
+      </div>
+      <div class="step bevel">
+        <div class="titlebar"><span class="groove"></span>Step 2<span class="groove"></span></div>
+        <div class="content">
+          <h3>Allow first launch</h3>
+          <p>MacAmp isn't notarized yet. If macOS blocks it, open System Settings › Privacy &amp; Security and click "Open Anyway", or run:</p>
+          <pre class="lcd">xattr -dr com.apple.quarantine /Applications/MacAmp.app</pre>
+        </div>
+      </div>
+      <div class="step bevel">
+        <div class="titlebar"><span class="groove"></span>Step 3<span class="groove"></span></div>
+        <div class="content">
+          <h3>Add skins</h3>
+          <p>Thousands of classic skins wait in the <a href="https://skins.webamp.org/">skin museum</a>. Drop a <code>.wsz</code> onto MacAmp to add it to File › Skins.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="final bevel">
+      <h2>Prefer to build it yourself?</h2>
+      <p>MacAmp is a plain Swift package. Clone it and run it, no Xcode project needed.</p>
+      <pre class="lcd" style="display:inline-block;text-align:left;margin:0 0 28px">git clone https://github.com/andrehickmann/macamp
+cd macamp &amp;&amp; swift run MacAmp</pre>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/andrehickmann/macamp/releases/latest/download/MacAmp.zip">Download</a>
+        <a class="btn" href="https://github.com/andrehickmann/macamp/issues">Report an issue</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <span>MacAmp · <a href="https://github.com/andrehickmann/macamp/blob/main/LICENSE">MIT License</a></span>
+      <span><a href="https://github.com/andrehickmann/macamp">GitHub</a> · <a href="https://github.com/andrehickmann/macamp/releases">Releases</a></span>
+    </div>
+    <p class="fine">MacAmp is an independent project and is not affiliated with or endorsed by Winamp, Nullsoft or Llama Group. Winamp is a trademark of its respective owner. Skins are the work of their respective authors.</p>
+  </div>
+</footer>
+
+<script>
+  // Light up the transport keycaps when the matching key is pressed.
+  const keys = document.getElementById('keys');
+  const press = (k, on) => keys.querySelector(`[data-k="${k}"]`)?.classList.toggle('on', on);
+  addEventListener('keydown', e => !e.metaKey && !e.ctrlKey && press(e.key.toLowerCase(), true));
+  addEventListener('keyup', e => press(e.key.toLowerCase(), false));
+  keys.addEventListener('pointerdown', e => { const k = e.target.closest('.key'); if (k) { k.classList.add('on'); setTimeout(() => k.classList.remove('on'), 140); } });
+</script>
+</body>
+</html>

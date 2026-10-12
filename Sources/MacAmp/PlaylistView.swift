@@ -90,8 +90,8 @@ final class PlaylistView: SkinView {
         let playlist = app.playlist
         let running = "\(TimeDisplay.string(seconds: playlist.selectedDuration))/\(TimeDisplay.string(seconds: playlist.totalDuration))"
         drawText(context, running, at: CGPoint(x: w - 143, y: h - 28), width: 70)
-        if app.player.state != .stopped {
-            drawText(context, TimeDisplay.string(seconds: app.player.currentTime), at: CGPoint(x: w - 84, y: h - 15), width: 25)
+        if app.transport.state != .stopped {
+            drawText(context, TimeDisplay.string(seconds: app.transport.currentTime), at: CGPoint(x: w - 84, y: h - 15), width: 25)
         }
     }
 
@@ -146,7 +146,7 @@ final class PlaylistView: SkinView {
         guard let current = playlist.current, playlist.entries.indices.contains(current) else { return }
         let entry = playlist.entries[current]
         drawText(context, "\(current + 1). \(entry.displayTitle)", at: CGPoint(x: 5, y: 4), width: w - 90)
-        drawText(context, TimeDisplay.string(seconds: entry.duration ?? app.player.duration), at: CGPoint(x: w - 82, y: 4),
+        drawText(context, TimeDisplay.string(seconds: entry.duration ?? app.transport.duration), at: CGPoint(x: w - 82, y: 4),
                  width: 25, alignRight: true)
     }
 
@@ -236,8 +236,8 @@ final class PlaylistView: SkinView {
         case .listMenu: popUp(listMenu(), for: event)
         case .previous: app.previous()
         case .play: app.play()
-        case .pause: app.player.pause()
-        case .stop: app.player.stop()
+        case .pause: app.transport.pause()
+        case .stop: app.transport.stop()
         case .next: app.next()
         case .eject: app.openFiles()
         case .resize, .scrollbar, .rows: break
