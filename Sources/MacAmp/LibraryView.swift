@@ -24,7 +24,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
     private static let title = "MEDIA LIBRARY"
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
         ("artist", "Artist", 130), ("title", "Title", 170), ("album", "Album", 130), ("length", "Length", 50),
-        ("track", "#", 28), ("genre", "Genre", 80), ("year", "Year", 40), ("rating", "Rating", 55),
+        ("track", "Track", 44), ("genre", "Genre", 80), ("year", "Year", 40), ("rating", "Rating", 55),
         ("plays", "Plays", 40), ("lastPlayed", "Last Played", 110),
     ]
 
@@ -81,6 +81,7 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
             tableColumn.title = column.title
             tableColumn.width = column.width
             tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.id, ascending: true)
+            if column.id == "track" { tableColumn.headerToolTip = "Track number on the album" }
             tracksTable.addTableColumn(tableColumn)
         }
         tracksTable.allowsMultipleSelection = true
