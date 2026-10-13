@@ -19,6 +19,8 @@ public final class SpectrumAnalyzer: @unchecked Sendable {
     private let window = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized,
                                      count: SpectrumAnalyzer.size, isHalfWindow: false)
     private let latest = OSAllocatedUnfairLock(initialState: [Float](repeating: 0, count: SpectrumAnalyzer.barCount))
+    /// The most recent `size` input samples, oldest first, for waveform visualizers.
+    private let recent = OSAllocatedUnfairLock(initialState: [Float](repeating: 0, count: SpectrumAnalyzer.size))
 
     public init() {
         setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2))!
@@ -29,9 +31,16 @@ public final class SpectrumAnalyzer: @unchecked Sendable {
     /// Latest bar heights in 0...1, lowest frequency first.
     public var bars: [Float] { latest.withLock { $0 } }
 
+    /// The last 1024 samples as bytes centered on 128, the format MilkDrop-style visualizers take.
+    public var waveform: [UInt8] {
+        recent.withLock { $0 }.map { UInt8(max(0, min(255, 128 + $0 * 127))) }
+    }
+
     public func process(_ samples: UnsafePointer<Float>, count: Int) {
         let bars = Self.bars(fromPower: power(samples, count: count))
         latest.withLock { $0 = bars }
+        let fresh = Array(UnsafeBufferPointer(start: samples, count: min(count, Self.size)))
+        recent.withLock { $0 = Array($0.dropFirst(fresh.count)) + fresh }
     }
 
     /// Power spectrum (|X|², `size / 2` bins) of the first `size` samples, Hann windowed.

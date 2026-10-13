@@ -40,6 +40,8 @@ final class SonosClient: Transport {
     var onChange: (() -> Void)?
     /// Index within the started run whose track the output group is now playing.
     var onRunIndex: ((Int) -> Void)?
+    /// The group played the run's last entry to its end.
+    var onRunFinished: (() -> Void)?
 
     /// Room MacAmp plays on (its whole group); nil plays on this Mac.
     var outputRoom: String? = UserDefaults.standard.string(forKey: "sonosOutputRoom") {
@@ -55,15 +57,23 @@ final class SonosClient: Transport {
     }
 
     private var pollTask: Task<Void, Never>?
+    private let mediaServer = MediaServer()
     private var isConnectingSpotify = false
     /// Appends the rest of a run to the queue; cancelled when something else starts.
     private var enqueueTask: Task<Void, Never>?
     private var polledAt = Date()
     private var volumeTasks: [String: Task<Void, Never>] = [:]
     /// Spotify URIs handed to the output group's queue, in order.
-    private var run: [String] = [] {
-        didSet { runStarted = false }
+    /// Playlist URLs handed to the output group's queue, in order, with the text that identifies each in the
+    /// URI Sonos reports (the Spotify URI, or the token of a served file).
+    private var run: [(url: URL, key: String)] = [] {
+        didSet {
+            runStarted = false
+            endingLastEntry = false
+        }
     }
+    /// The previous poll saw the run's last entry within its final seconds.
+    private var endingLastEntry = false
     /// The group reported a run entry once; until then the previous item may still show.
     private var runStarted = false
     /// Account number (`sn`) Sonos plays Spotify with; found by `connectSpotify`.
@@ -155,15 +165,27 @@ final class SonosClient: Transport {
 
     // MARK: Playback on the output group
 
-    /// Replaces the output group's queue with these Spotify tracks and plays the first; the rest is
-    /// enqueued in the background while it already plays.
-    func play(spotify tracks: [(uri: String, title: String?)]) async throws {
+    /// Replaces the output group's queue with these entries (Spotify tracks and local files, which MacAmp serves
+    /// over HTTP) and plays the first; the rest is enqueued in the background while it already plays.
+    func play(_ entries: [(url: URL, title: String?)]) async throws {
         let group = try await resolvedOutput()
-        guard let account = spotifyAccount, let service = spotifyService else { throw SonosError.noSpotifyAccount }
         let host = group.coordinator.host
-        let items = tracks.map { Sonos.spotifyItem($0.uri, title: $0.title, service: service, account: account) }
+        var items: [Item] = []
+        var keys: [String] = []
+        for entry in entries {
+            if entry.url.isFileURL {
+                let served = try await mediaServer.url(for: entry.url, reachableFrom: host)
+                items.append(Sonos.fileItem(served, title: entry.title, fileExtension: entry.url.pathExtension))
+                keys.append(served.pathComponents.dropFirst().first ?? served.absoluteString)
+            } else {
+                guard let account = spotifyAccount, let service = spotifyService else { throw SonosError.noSpotifyAccount }
+                items.append(Sonos.spotifyItem(entry.url.absoluteString, title: entry.title, service: service, account: account))
+                keys.append(entry.url.absoluteString)
+            }
+        }
+        guard !items.isEmpty else { return }
         enqueueTask?.cancel()
-        run = tracks.map(\.uri)
+        run = zip(entries.map(\.url), keys).map { ($0, $1) }
         try await call(host, .avTransport, "RemoveAllTracksFromQueue")
         try await enqueue(items[0], on: host)
         try await call(host, .avTransport, "SetAVTransportURI",
@@ -194,7 +216,7 @@ final class SonosClient: Transport {
         }
     }
 
-    func runOffset(of spotifyURI: String) -> Int? { run.firstIndex(of: spotifyURI) }
+    func runOffset(of url: URL) -> Int? { run.firstIndex { $0.url == url } }
 
     func play(radio stream: URL, title: String?) async throws {
         let group = try await resolvedOutput()
@@ -294,7 +316,7 @@ final class SonosClient: Transport {
 
     private func runIndex(of playback: SonosPlayback?) -> Int? {
         guard let uri = playback?.uri?.removingPercentEncoding else { return nil }
-        return run.firstIndex { uri.contains($0) }
+        return run.firstIndex { uri.contains($0.key) }
     }
 
     // MARK: Room controls
@@ -404,11 +426,21 @@ final class SonosClient: Transport {
         throw SonosError.noSpeakers
     }
 
-    /// Reports which run entry plays; forgets the run once the group plays something else.
+    /// Reports which run entry plays and when the last one ended; forgets the run once the group plays
+    /// something else. Sonos stops after its queue, so the end shows as a stop right after the last entry's
+    /// final seconds (polls are 2 s apart).
     private func followRun() {
-        guard !run.isEmpty, let playback, playback.uri != nil else { return }
+        guard !run.isEmpty, let playback else { return }
+        if playback.state == .stopped, endingLastEntry {
+            run = []
+            onRunFinished?()
+            return
+        }
+        guard playback.uri != nil else { return }
         if let index = runIndex(of: playback) {
             runStarted = true
+            endingLastEntry = index == run.count - 1 && playback.state == .playing
+                && playback.duration > 0 && playback.position >= playback.duration - 5
             onRunIndex?(index)
         } else if runStarted {
             run = []

@@ -13,6 +13,7 @@ cp Resources/Info.plist "$app/Contents/"
 mkdir -p "$app/Contents/Resources"
 cp Resources/AppIcon.icns "$app/Contents/Resources/"
 [ -d Resources/Skins ] && cp -R Resources/Skins "$app/Contents/Resources/"
+cp -R Resources/Visualizer "$app/Contents/Resources/"
 codesign --force --sign - "$app"
 rm -f .build/MacAmp.zip
 ditto -c -k --keepParent "$app" .build/MacAmp.zip

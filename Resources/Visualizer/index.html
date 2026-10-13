@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: pointer; } canvas { display: block; width: 100%; height: 100%; }</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+// Reports script errors to MacAmp's log (no-op in a normal browser).
+window.onerror = (message, source, line) => window.webkit?.messageHandlers?.log?.postMessage(`${message} (${source}:${line})`);
+</script>
+<script src="butterchurn.min.js"></script>
+<script src="butterchurnPresets.min.js"></script>
+<script>
+// MacAmp feeds 1024 waveform bytes (128 = silence) via feed(); the audio context is only required by the API.
+const canvas = document.getElementById('canvas');
+const library = window.butterchurn.default || window.butterchurn;
+const pack = window.butterchurnPresets.default || window.butterchurnPresets;
+const presets = pack.getPresets();
+const names = Object.keys(presets);
+let wave = new Uint8Array(1024).fill(128);
+
+const visualizer = library.createVisualizer(new AudioContext(), canvas, { width: 400, height: 300, pixelRatio: window.devicePixelRatio || 1 });
+
+function resize() {
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = innerWidth * ratio;
+  canvas.height = innerHeight * ratio;
+  visualizer.setRendererSize(innerWidth, innerHeight);
+}
+
+function nextPreset(blendSeconds) {
+  visualizer.loadPreset(presets[names[Math.floor(Math.random() * names.length)]], blendSeconds);
+}
+
+window.feed = bytes => { wave = Uint8Array.from(bytes); };
+window.addEventListener('resize', resize);
+canvas.addEventListener('click', () => nextPreset(2.7));
+setInterval(() => nextPreset(5), 25000);
+
+resize();
+nextPreset(0);
+(function frame() {
+  visualizer.render({ audioLevels: { timeByteArray: wave, timeByteArrayL: wave, timeByteArrayR: wave } });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

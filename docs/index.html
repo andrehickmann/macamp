@@ -262,7 +262,7 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #79728a; max-width: 80c
           Source on GitHub
         </a>
       </div>
-      <p class="meta rise d4"><b>v0.1.0</b> · universal · MIT license</p>
+      <p class="meta rise d4"><b>v0.2.0</b> · universal · MIT license</p>
     </div>
     <div class="stage rise d2">
       <img class="lib" src="library.png" width="550" height="348" alt="MacAmp media library window">
@@ -274,7 +274,7 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #79728a; max-width: 80c
     <div class="bars lcd">
       <i style="animation-delay:-.1s"></i><i style="animation-delay:-.7s"></i><i style="animation-delay:-.3s"></i><i style="animation-delay:-.9s"></i><i style="animation-delay:-.5s"></i><i style="animation-delay:-.2s"></i><i style="animation-delay:-.8s"></i><i style="animation-delay:-.4s"></i><i style="animation-delay:-.6s"></i><i style="animation-delay:-.15s"></i><i style="animation-delay:-.75s"></i><i style="animation-delay:-.35s"></i>
     </div>
-    <div class="run lcd"><span>*** 1. MACAMP – CLASSIC SKINS, NATIVE ON MACOS *** MP3 · AAC · ALAC · FLAC · OGG VORBIS · OPUS · WAV · AIFF *** SHOUTCAST &amp; ICECAST RADIO *** 10-BAND EQ *** MEDIA KEYS &amp; NOW PLAYING ***</span></div>
+    <div class="run lcd"><span>*** 1. MACAMP – CLASSIC SKINS, NATIVE ON MACOS *** MP3 · AAC · ALAC · FLAC · OGG VORBIS · OPUS · WAV · AIFF *** SHOUTCAST &amp; ICECAST RADIO *** SPOTIFY *** SONOS ROOMS *** MILKDROP *** 10-BAND EQ *** MEDIA KEYS &amp; NOW PLAYING ***</span></div>
   </div>
 
   <section id="features">
@@ -292,13 +292,17 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #79728a; max-width: 80c
           <li><h3>Playlist editor</h3><span class="tag">PL</span><p>Multi-select, drag to reorder, sort, reverse, randomize, remove missing, resize, and save or load <code>.m3u</code>.</p></li>
           <li><h3>Internet radio</h3><span class="tag">ICY</span><p>Shoutcast and Icecast streams (MP3/AAC) with live stream titles. Open <code>.pls</code>/<code>.m3u</code> station links directly.</p></li>
           <li><h3>Media library</h3><span class="tag">ML</span><p>Watched folders, tag scan, search, smart views, ratings, play counts and saved playlists.</p></li>
-          <li><h3>Spectrum analyzer</h3><span class="tag">VIS</span><p>The classic bars, right where they belong, driven by the actual audio.</p></li>
+          <li><h3>Spotify, no app needed</h3><span class="tag">SPOT</span><p>Spotify tracks play inside MacAmp as a Spotify Connect device named "MacAmp". Browse Liked Songs and playlists, and add tracks to them from the context menu or by drag and drop. <span class="exp">experimental</span></p></li>
+          <li><h3>Sonos rooms</h3><span class="tag">SONOS</span><p>See what every room plays, group rooms, set group and room volume, and make a room MacAmp's output: Spotify, local files and radio then play on the speakers.</p></li>
+          <li><h3>MilkDrop</h3><span class="tag">MILK</span><p>The legendary visualizer in its own window, via Butterchurn. Presets react to whatever MacAmp plays; click for the next one.</p></li>
+          <li><h3>Artist info</h3><span class="tag">ART</span><p>Cover, genres, a Wikipedia intro, albums and an artist radio for the Spotify track that plays.</p></li>
+          <li><h3>Spectrum analyzer</h3><span class="tag">VIS</span><p>The classic bars, right where they belong, driven by the actual audio, Spotify included (macOS 14.2+).</p></li>
           <li><h3>A real Mac citizen</h3><span class="tag">MAC</span><p>Media keys, Control Center "Now Playing", drag and drop, and settings that persist across launches.</p></li>
         </ol>
       </div>
       <div class="foot">
         <div class="chips" aria-hidden="true"><span class="chip">ADD</span><span class="chip">REM</span><span class="chip">SEL</span><span class="chip">MISC</span></div>
-        <div class="lcd">8 features · 0:00/∞</div>
+        <div class="lcd">12 features · 0:00/∞</div>
       </div>
     </div>
   </section>
@@ -311,10 +315,25 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #79728a; max-width: 80c
           <li><b>Watched folders</b> are scanned for tags and stay up to date.</li>
           <li><b>Smart views:</b> most played, recently added, never played, top rated.</li>
           <li><b>Drag to playlist</b> or enqueue straight from search results.</li>
-          <li><b>Spotify</b> <span class="exp">experimental</span> browse Liked Songs and playlists from the library. Needs Spotify Premium and your own Spotify developer Client ID, which can't be set in the app yet.</li>
+          <li><b>Add to playlist:</b> right-click or drag tracks onto a playlist in the sidebar, Liked Songs included.</li>
+          <li><b>Spotify</b> <span class="exp">experimental</span> browse Liked Songs and playlists from the library and play them in MacAmp itself. Needs Spotify Premium and your own Spotify developer Client ID, which can't be set in the app yet.</li>
         </ul>
       </div>
       <div class="shot bevel"><img src="library.png" width="550" height="348" alt="Media library with local media views and a track list" loading="lazy"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="split">
+      <div class="shot bevel"><img src="milkdrop.png" width="375" height="261" alt="MilkDrop window with a swirling preset" loading="lazy"></div>
+      <div>
+        <h2>MilkDrop is back</h2>
+        <ul>
+          <li><b>100 classic presets</b> from the MilkDrop community, rendered with WebGL by <a href="https://github.com/jberg/butterchurn">Butterchurn</a>.</li>
+          <li><b>Follows the music:</b> local files, radio and Spotify all drive it.</li>
+          <li><b>Click</b> for the next preset; they also change on their own. Open it with <kbd>⌥V</kbd>.</li>
+        </ul>
+      </div>
     </div>
   </section>
 
@@ -330,7 +349,7 @@ footer .fine { margin-top: 14px; font-size: 13px; color: #79728a; max-width: 80c
       <div class="key" data-k="v"><div class="cap">V</div><span>stop</span></div>
       <div class="key" data-k="b"><div class="cap">B</div><span>next</span></div>
     </div>
-    <p class="keys-note"><kbd>L</kbd> open · <kbd>R</kbd> repeat · <kbd>S</kbd> shuffle · <kbd>←/→</kbd> seek · <kbd>⌥G</kbd> equalizer · <kbd>⌥E</kbd> playlist · <kbd>⌥L</kbd> library · <kbd>⌃W</kbd> shade · <kbd>⌃D</kbd> double size</p>
+    <p class="keys-note"><kbd>L</kbd> open · <kbd>R</kbd> repeat · <kbd>S</kbd> shuffle · <kbd>←/→</kbd> seek · <kbd>⌥G</kbd> equalizer · <kbd>⌥E</kbd> playlist · <kbd>⌥L</kbd> library · <kbd>⌥R</kbd> rooms · <kbd>⌥A</kbd> artist · <kbd>⌥V</kbd> MilkDrop · <kbd>⌃W</kbd> shade · <kbd>⌃D</kbd> double size</p>
   </section>
 
   <section id="install">

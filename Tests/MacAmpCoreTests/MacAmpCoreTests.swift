@@ -340,3 +340,26 @@ import Testing
     // Only each artist's ten most popular songs are picked.
     #expect(mix.allSatisfy { Int($0.recordingName.dropFirst(5))! <= 10 })
 }
+
+@Test func sonosFileItemsAndByteRanges() {
+    let item = Sonos.fileItem(URL(string: "http://10.0.0.5:8080/abc/Song.flac")!, title: "Song", fileExtension: "flac")
+    #expect(item.uri == "http://10.0.0.5:8080/abc/Song.flac")
+    #expect(item.metadata.contains(#"protocolInfo="http-get:*:audio/flac:*""#) && !item.metadata.contains("<desc"))
+
+    #expect(Sonos.byteRange("bytes=0-99", size: 1000) == 0...99)
+    #expect(Sonos.byteRange("bytes=900-", size: 1000) == 900...999)
+    #expect(Sonos.byteRange("bytes=-100", size: 1000) == 900...999)
+    #expect(Sonos.byteRange("bytes=500-5000", size: 1000) == 500...999)
+    #expect(Sonos.byteRange("bytes=1000-", size: 1000) == nil)
+    #expect(Sonos.byteRange(nil, size: 1000) == nil)
+}
+
+@Test func waveformKeepsTheLatestSamplesAsCenteredBytes() {
+    let analyzer = SpectrumAnalyzer()
+    let samples: [Float] = [-1, 0, 1, 0.5]
+    samples.withUnsafeBufferPointer { analyzer.process($0.baseAddress!, count: $0.count) }
+    let waveform = analyzer.waveform
+    #expect(waveform.count == 1024)
+    #expect(Array(waveform.suffix(4)) == [1, 128, 255, 191])
+    #expect(waveform.first == 128)
+}

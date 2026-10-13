@@ -67,6 +67,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private(set) var librarySize = CGSize(width: 550, height: 348)
     private(set) var roomsSize = CGSize(width: 500, height: 203)
     private(set) var artistSize = CGSize(width: 500, height: 232)
+    private(set) var visualizerSize = CGSize(width: 375, height: 261)
     private(set) var library = Library() {
         didSet { libraryView?.libraryChanged() }
     }
@@ -79,12 +80,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var libraryWindow: SkinWindow!
     private var roomsWindow: SkinWindow!
     private var artistWindow: SkinWindow!
+    private var visualizerWindow: SkinWindow!
     private var mainView: MainWindowView!
     private var equalizerView: EqualizerView?
     private var playlistView: PlaylistView?
     private var libraryView: LibraryView?
     private var roomsView: RoomsView?
     private var artistView: ArtistView?
+    private var visualizerView: VisualizerView?
     private var nowPlaying: NowPlaying?
     private var windowDrag: (mouse: CGPoint, primary: NSWindow, origins: [(NSWindow, CGPoint)])?
     /// Per-file equalizer curves for EQ "Auto": path → [preamp] + bands.
@@ -97,12 +100,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var audioTap: AnyObject?
     private var audioTapFailed = false
 
-    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow, roomsWindow, artistWindow].compactMap { $0 } }
+    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow, roomsWindow, artistWindow, visualizerWindow].compactMap { $0 } }
     var equalizerVisible: Bool { equalizerWindow?.isVisible ?? false }
     var playlistVisible: Bool { playlistWindow?.isVisible ?? false }
     var libraryVisible: Bool { libraryWindow?.isVisible ?? false }
     var roomsVisible: Bool { roomsWindow?.isVisible ?? false }
     var artistVisible: Bool { artistWindow?.isVisible ?? false }
+    var visualizerVisible: Bool { visualizerWindow?.isVisible ?? false }
     /// Snapshot runs must not touch the user's settings, window positions or library.
     private var isSnapshotRun: Bool { UserDefaults.standard.string(forKey: "snapshot") != nil }
     private static let supportFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -148,10 +152,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         self.artistView = artistView
         let (artist, artistRestored) = makeWindow(artistView, name: "ArtistWindow", title: "MacAmp Artist")
         artistWindow = artist
+        let visualizerView = VisualizerView(app: self)
+        self.visualizerView = visualizerView
+        let (visualizer, visualizerRestored) = makeWindow(visualizerView, name: "VisualizerWindow", title: "MacAmp MilkDrop")
+        visualizerWindow = visualizer
         mainWindow = main
         equalizerWindow = equalizer
         playlistWindow = playlist
-        for view in [mainView, equalizerView, playlistView, libraryView, roomsView, artistView] as [SkinView] { updateSize(of: view) }
+        for view in [mainView, equalizerView, playlistView, libraryView, roomsView, artistView, visualizerView] as [SkinView] {
+            updateSize(of: view)
+        }
+        if !visualizerRestored { visualizer.center() }
 
         // First launch: stack equalizer and playlist below the main window, like the original.
         if !mainRestored { main.center() }
@@ -169,6 +180,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         if defaults.bool(forKey: "libraryVisible") { library.orderFront(nil) }
         if defaults.bool(forKey: "roomsVisible") { rooms.orderFront(nil) }
         if defaults.bool(forKey: "artistVisible") { artist.orderFront(nil) }
+        if defaults.bool(forKey: "visualizerVisible") { visualizer.orderFront(nil) }
         artistView.trackChanged()
         NSApp.mainMenu = makeMainMenu()
         NSApp.activate()
@@ -193,6 +205,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
             self?.roomsView?.roomsChanged()
         }
         sonos.onRunIndex = { [weak self] offset in self?.sonosRunMoved(to: offset) }
+        sonos.onRunFinished = { [weak self] in self?.trackEnded() }
         sonos.isWatched = roomsVisible
         player.onStreamInfo = { [weak self] info in self?.streamInfoChanged(info) }
         player.onStreamFailure = { [weak self] message in
@@ -231,8 +244,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private func animate() {
         tick += 1
         if tick % 15 == 0 { updateVisualizerTap() }
+        if visualizerVisible { visualizerView?.feed(visualizerWaveform ?? Self.silence) }
         mainView.animate()
         if tick % 10 == 0 { playlistView?.needsDisplay = true }
+    }
+
+    private static let silence = [UInt8](repeating: 128, count: 1024)
+
+    /// Waveform for the MilkDrop window, from the same source as `visualizerBars`.
+    var visualizerWaveform: [UInt8]? {
+        if player.state == .playing { return player.analyzer.waveform }
+        if #available(macOS 14.2, *), let tap = audioTap as? SystemAudioTap, tap.isRunning { return tap.analyzer.waveform }
+        return nil
     }
 
     /// Bars for the spectrum analyzer: the local player's, or Spotify's captured from the system while it plays here.
@@ -396,27 +419,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
     }
 
-    /// Plays the entry on the Sonos output: Spotify entries go into the group's queue (a run of them, like
-    /// `playSpotify`), radio streams play directly. Local files would need MacAmp to serve them over HTTP.
+    /// Plays the entry on the Sonos output: a run of Spotify entries and local files goes into the group's queue
+    /// (like `playSpotify`), radio streams play directly.
     private func playOnSonos(at index: Int) {
         player.stop()
         spotify.release()
         trackInfo = nil
         let entry = playlist.entries[index]
-        guard !entry.url.isFileURL else {
-            statusMessage = "[Local files can't play on Sonos]"
-            return
-        }
-        if entry.url.scheme == "spotify", let offset = sonos.runOffset(of: entry.url.absoluteString), sonosRunStart + offset == index {
+        // Spotify tracks and local files share the group's queue; radio streams play on their own.
+        let queueable = { (entry: PlaylistEntry) in entry.url.isFileURL || entry.url.scheme == "spotify" }
+        if let offset = sonos.runOffset(of: entry.url), sonosRunStart + offset == index {
             return sonos.playRunItem(at: offset)
         }
         statusMessage = "[Connecting to Sonos]"
         Task {
             do {
-                if entry.url.scheme == "spotify" {
-                    let run = playlist.entries[index...].prefix { $0.url.scheme == "spotify" }.prefix(shuffle ? 1 : 100)
+                if queueable(entry) {
+                    let run = playlist.entries[index...].prefix(while: queueable).prefix(shuffle ? 1 : 100)
                     sonosRunStart = index
-                    try await sonos.play(spotify: run.map { ($0.url.absoluteString, $0.title) })
+                    try await sonos.play(run.map { ($0.url, $0.title) })
                 } else {
                     try await sonos.play(radio: await Self.resolveStream(entry.url), title: entry.title)
                 }
@@ -665,6 +686,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         artistSize = size
         if let artistView { updateSize(of: artistView) }
     }
+
+    func setVisualizerSize(_ size: CGSize) {
+        guard size != visualizerSize else { return }
+        visualizerSize = size
+        if let visualizerView { updateSize(of: visualizerView) }
+    }
+
+    @objc func toggleVisualizer() { toggleVisibility(of: visualizerWindow) }
 
     @objc func toggleArtist() {
         toggleVisibility(of: artistWindow)
@@ -1277,6 +1306,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         addItem(to: menu, "Media Library", #selector(toggleLibrary), key: "l", modifiers: .option)
         addItem(to: menu, "Rooms", #selector(toggleRooms), key: "r", modifiers: .option)
         addItem(to: menu, "Artist", #selector(toggleArtist), key: "a", modifiers: .option)
+        addItem(to: menu, "MilkDrop", #selector(toggleVisualizer), key: "v", modifiers: .option)
         addItem(to: menu, "Window Shade", #selector(toggleMainShadeAction), key: "w", modifiers: .control)
         addItem(to: menu, "Double Size", #selector(toggleDoubleSize), key: "d", modifiers: .control)
     }
@@ -1297,6 +1327,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         case #selector(toggleLibrary): libraryVisible
         case #selector(toggleRooms): roomsVisible
         case #selector(toggleArtist): artistVisible
+        case #selector(toggleVisualizer): visualizerVisible
         case #selector(toggleMainShadeAction): mainShade
         case #selector(toggleDoubleSize): doubleSize
         default: nil
@@ -1328,6 +1359,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
         if let size = defaults.array(forKey: "roomsSize") as? [Double], size.count == 2 {
             roomsSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
+        }
+        if let size = defaults.array(forKey: "visualizerSize") as? [Double], size.count == 2 {
+            visualizerSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
         }
         if let size = defaults.array(forKey: "artistSize") as? [Double], size.count == 2 {
             artistSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
@@ -1366,6 +1400,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         defaults.set(roomsVisible, forKey: "roomsVisible")
         defaults.set([roomsSize.width, roomsSize.height], forKey: "roomsSize")
         defaults.set(artistVisible, forKey: "artistVisible")
+        defaults.set(visualizerVisible, forKey: "visualizerVisible")
+        defaults.set([visualizerSize.width, visualizerSize.height], forKey: "visualizerSize")
         defaults.set([artistSize.width, artistSize.height], forKey: "artistSize")
         defaults.set(autoPresets, forKey: "autoPresets")
         defaults.set(try? encoder.encode(equalizer), forKey: "equalizer")
@@ -1398,7 +1434,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             let base = URL(fileURLWithPath: path).deletingPathExtension().path
             let views: [(String, NSView?)] = [("main", mainView), ("equalizer", equalizerView), ("playlist", playlistView),
-                                              ("library", libraryView), ("rooms", roomsView), ("artist", artistView)]
+                                              ("library", libraryView), ("rooms", roomsView), ("artist", artistView),
+                                              ("visualizer", visualizerView)]
             for (name, view) in views {
                 guard let view, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
                 view.cacheDisplay(in: view.bounds, to: rep)

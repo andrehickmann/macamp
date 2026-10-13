@@ -153,15 +153,53 @@ public enum Sonos {
               descriptor: "SA_RINCON65031_"))
     }
 
+    /// A local file MacAmp serves over HTTP (`url`), queued like any track.
+    public static func fileItem(_ url: URL, title: String?, fileExtension: String) -> (uri: String, metadata: String) {
+        (url.absoluteString,
+         didl(id: "-1", title: title ?? url.deletingPathExtension().lastPathComponent, upnpClass: "object.item.audioItem.musicTrack",
+              resource: (url.absoluteString, "http-get:*:\(mimeType(forExtension: fileExtension)):*")))
+    }
+
+    /// MIME types for the formats Sonos plays from a URL.
+    public static func mimeType(forExtension fileExtension: String) -> String {
+        switch fileExtension.lowercased() {
+        case "mp3": "audio/mpeg"
+        case "m4a", "aac", "mp4", "alac": "audio/mp4"
+        case "flac": "audio/flac"
+        case "wav": "audio/wav"
+        case "aif", "aiff": "audio/aiff"
+        case "ogg", "oga": "audio/ogg"
+        default: "application/octet-stream"
+        }
+    }
+
+    /// The byte range a `Range: bytes=…` header asks for in a file of `size` bytes; nil for the whole file
+    /// or a range it can't satisfy. Supports `a-b`, `a-` and the suffix form `-n`.
+    public static func byteRange(_ header: String?, size: Int) -> ClosedRange<Int>? {
+        guard let header, header.hasPrefix("bytes="), size > 0 else { return nil }
+        let parts = header.dropFirst(6).split(separator: ",")[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return nil }
+        let start = Int(parts[0].trimmingCharacters(in: .whitespaces)), end = Int(parts[1].trimmingCharacters(in: .whitespaces))
+        switch (start, end) {
+        case let (start?, end?) where start <= end && start < size: return start...min(end, size - 1)
+        case let (start?, nil) where start < size: return start...(size - 1)
+        case let (nil, suffix?) where suffix > 0: return max(0, size - suffix)...(size - 1)
+        default: return nil
+        }
+    }
+
     /// Joining a group means following its coordinator's transport.
     public static func groupURI(coordinator: String) -> String { "x-rincon:\(coordinator)" }
 
     public static func queueURI(of room: String) -> String { "x-rincon-queue:\(room)#0" }
 
-    private static func didl(id: String, title: String, upnpClass: String, descriptor: String) -> String {
-        #"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#
+    private static func didl(id: String, title: String, upnpClass: String, descriptor: String? = nil,
+                             resource: (url: String, protocolInfo: String)? = nil) -> String {
+        let res = resource.map { #"<res protocolInfo="\#($0.protocolInfo)">\#(escape($0.url))</res>"# } ?? ""
+        let desc = descriptor.map { #"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\#($0)</desc>"# } ?? ""
+        return #"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">"#
             + #"<item id="\#(id)" parentID="" restricted="true"><dc:title>\#(escape(title))</dc:title><upnp:class>\#(upnpClass)</upnp:class>"#
-            + #"<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\#(descriptor)</desc></item></DIDL-Lite>"#
+            + res + desc + "</item></DIDL-Lite>"
     }
 }
 

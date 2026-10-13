@@ -5,11 +5,14 @@ A native macOS player that recreates the classic Winamp 2.x interface and loads 
 <img src="docs/screenshot.png" alt="MacAmp main window, equalizer and playlist editor" width="275">
 
 Plays MP3, AAC/M4A, ALAC, FLAC, Ogg Vorbis, Opus, WAV and AIFF through Core Audio, plus
-Shoutcast/Icecast radio streams (MP3/AAC).
+Shoutcast/Icecast radio streams (MP3/AAC). Spotify plays right in MacAmp, Sonos rooms are one window away, and
+a MilkDrop window follows the music.
 
 **[Download](https://github.com/andrehickmann/macamp/releases/latest/download/MacAmp.zip)** · [Website](https://andrehickmann.github.io/macamp/) · macOS 14+, Apple Silicon and Intel
 
 <img src="docs/library.png" alt="MacAmp media library" width="550">
+
+<img src="docs/milkdrop.png" alt="MacAmp MilkDrop window with a preset reacting to the music" width="375">
 
 ## Install
 
@@ -64,10 +67,13 @@ Development options (passed as user defaults):
   add tracks to Liked Songs or your own Spotify playlists from the context menu in the library or playlist editor,
   or by dragging them onto a playlist in the library sidebar
 - Sonos (`⌥R`, Rooms window): see what each room plays, group rooms, set group and room volume, and choose a room
-  as MacAmp's output; Spotify tracks and radio streams from the playlist then play on the speakers without the
-  Spotify app. For Spotify, click Connect Sonos once (Spotify must be set up in the Sonos app; start a song in
+  as MacAmp's output; Spotify tracks, local files (MacAmp serves them in your network) and radio streams from the
+  playlist then play on the speakers without the Spotify app, continuing through the playlist. For Spotify, click
+  Connect Sonos once (Spotify must be set up in the Sonos app; start a song in
   Spotify on your phone first so MacAmp can tell your account from others in a family plan)
 - Artist window (`⌥A`): cover, genres, Wikipedia intro, albums and an artist radio for the Spotify track that plays
+- MilkDrop window (`⌥V`): MilkDrop presets via [Butterchurn](https://github.com/jberg/butterchurn) (MIT), following
+  whatever MacAmp plays; click for the next preset (credits in `Resources/Visualizer/CREDITS.md`)
 - Spectrum analyzer, media keys and Control Center "Now Playing"
 - Settings, playlist and window positions persist across launches
 
@@ -82,7 +88,7 @@ Spotify limits apps in development mode to five allowlisted users, so register y
 ## Keys
 
 `Z` previous · `X` play · `C` pause · `V` stop · `B` next · `L` open · `R` repeat · `S` shuffle ·
-`←/→` seek 5 s · `↑/↓` volume · `⌥G` equalizer · `⌥E` playlist · `⌥L` media library · `⌥R` rooms · `⌥A` artist · `⌘L` open URL ·
+`←/→` seek 5 s · `↑/↓` volume · `⌥G` equalizer · `⌥E` playlist · `⌥L` media library · `⌥R` rooms · `⌥A` artist · `⌥V` MilkDrop · `⌘L` open URL ·
 `⌃W` shade · `⌃D` double size
 
 In the playlist: `⌫` remove, `↩` play, `↑/↓` select, `⌘A` select all.
