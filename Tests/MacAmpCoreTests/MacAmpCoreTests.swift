@@ -240,3 +240,103 @@ import Testing
     target.draw(try #require(skin.sheets["main"]), in: CGRect(x: 0, y: 0, width: 1, height: 1))
     #expect(target.data!.load(as: UInt8.self) == 255)
 }
+
+@Test func sonosTopologyHidesStereoPartnersAndPutsCoordinatorFirst() {
+    // Shape of a real GetZoneGroupState response: the topology is escaped XML inside the SOAP body.
+    let topology = """
+    <ZoneGroupState><ZoneGroups>
+    <ZoneGroup Coordinator="RINCON_B01400" ID="RINCON_B01400:12">
+      <ZoneGroupMember UUID="RINCON_A01400" Location="http://10.0.0.11:1400/xml/device_description.xml" ZoneName="Kitchen"/>
+      <ZoneGroupMember UUID="RINCON_B01400" Location="http://10.0.0.12:1400/xml/device_description.xml" ZoneName="Living Room"/>
+      <ZoneGroupMember UUID="RINCON_C01400" Location="http://10.0.0.13:1400/xml/device_description.xml" ZoneName="Living Room" Invisible="1"/>
+    </ZoneGroup>
+    <ZoneGroup Coordinator="RINCON_D01400" ID="RINCON_D01400:3">
+      <ZoneGroupMember UUID="RINCON_D01400" Location="http://10.0.0.14:1400/xml/device_description.xml" ZoneName="Garden">
+        <Satellite UUID="RINCON_E01400" Location="http://10.0.0.15:1400/xml/device_description.xml" ZoneName="Garden" Invisible="1"/>
+      </ZoneGroupMember>
+    </ZoneGroup>
+    </ZoneGroups></ZoneGroupState>
+    """
+    let response = "<s:Envelope><s:Body><u:GetZoneGroupStateResponse><ZoneGroupState>\(Sonos.escape(topology))</ZoneGroupState>"
+        + "</u:GetZoneGroupStateResponse></s:Body></s:Envelope>"
+    let groups = Sonos.groups(fromZoneGroupState: response)
+    #expect(groups.map(\.name) == ["Garden", "Living Room + Kitchen"])
+    #expect(groups[1].coordinator == SonosRoom(id: "RINCON_B01400", name: "Living Room", host: "10.0.0.12"))
+    #expect(groups[1].id == "RINCON_B01400")
+}
+
+@Test func sonosPlaybackReadsTrackAndRadioMetadata() {
+    func positionInfo(_ uri: String, _ metadata: String) -> String {
+        "<r><Track>2</Track><TrackDuration>0:04:05</TrackDuration><TrackMetaData>\(Sonos.escape(metadata))</TrackMetaData>"
+            + "<TrackURI>\(Sonos.escape(uri))</TrackURI><RelTime>0:01:02</RelTime></r>"
+    }
+    let didl = #"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1"><dc:title>Song &amp; Dance</dc:title><dc:creator>The Band</dc:creator><upnp:album>Album</upnp:album></item></DIDL-Lite>"#
+    let track = Sonos.playback(transportInfo: "<r><CurrentTransportState>PAUSED_PLAYBACK</CurrentTransportState></r>",
+                               positionInfo: positionInfo("x-sonos-spotify:spotify%3atrack%3aabc?sid=12&flags=8224&sn=3", didl))
+    #expect(track.state == .paused)
+    #expect(track.displayTitle == "The Band - Song & Dance")
+    #expect(track.trackNumber == 2 && track.position == 62 && track.duration == 245)
+
+    let radio = #"<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><item><dc:title>stream.mp3</dc:title><r:streamContent>Artist - Live</r:streamContent></item></DIDL-Lite>"#
+    let stream = Sonos.playback(transportInfo: "<r><CurrentTransportState>PLAYING</CurrentTransportState></r>",
+                                positionInfo: positionInfo("x-rincon-mp3radio://https://example.com/stream.mp3", radio))
+    #expect(stream.state == .playing && stream.displayTitle == "Artist - Live")
+}
+
+@Test func sonosItemsEncodeSpotifyAndRadioURIs() {
+    let services = #"<Service Id="254" Name="TuneIn"/><Service Id="9" Name="Spotify" Uri="https://example.com/smapi"/>"#
+    let response = "<r><AvailableServiceDescriptorList>\(Sonos.escape("<Services>\(services)</Services>"))</AvailableServiceDescriptorList></r>"
+    #expect(Sonos.spotifyService(inAvailableServices: response) == 9)
+
+    let spotify = Sonos.spotifyItem("spotify:track:4uLU6hMCjMI75M1A2tKUQC", title: "A & B", service: 9, account: 2)
+    #expect(spotify.uri == "x-sonos-spotify:spotify%3atrack%3a4uLU6hMCjMI75M1A2tKUQC?sid=9&flags=8224&sn=2")
+    #expect(spotify.metadata.contains(#"id="00032020spotify%3atrack%3a4uLU6hMCjMI75M1A2tKUQC""#))
+    #expect(spotify.metadata.contains("SA_RINCON2311_X_#Svc2311-0-Token") && spotify.metadata.contains("A &amp; B"))
+    #expect(Sonos.radioItem(URL(string: "https://example.com/live.mp3")!, title: nil).uri == "x-rincon-mp3radio://https://example.com/live.mp3")
+    #expect(Sonos.time(3725) == "1:02:05" && Sonos.seconds("NOT_IMPLEMENTED") == 0)
+
+    let body = Sonos.envelope(service: "AVTransport", action: "SetAVTransportURI",
+                              arguments: [("InstanceID", "0"), ("CurrentURI", spotify.uri)])
+    #expect(Sonos.value("CurrentURI", in: body) == spotify.uri)
+}
+
+@Test func artistWikiRejectsUnsafeIDsAndPrefersTheFirstLanguage() throws {
+    #expect(ArtistWiki.articlesQuery(spotifyArtistID: "x\". ?a ?b ?c", languages: ["en"]) == nil)
+    #expect(ArtistWiki.articlesQuery(spotifyArtistID: "0OdUWJ0sBjDrqHygGUXeCF", languages: ["de", "en"]) != nil)
+    let result = Data("""
+        {"results": {"bindings": [
+          {"article": {"value": "https://en.wikipedia.org/wiki/Die_%C3%84rzte"}, "lang": {"value": "en"}},
+          {"article": {"value": "https://de.wikipedia.org/wiki/Die_%C3%84rzte"}, "lang": {"value": "de"}}
+        ]}}
+        """.utf8)
+    #expect(ArtistWiki.summaryURL(fromQueryResult: result, languages: ["de", "en"])?.absoluteString
+        == "https://de.wikipedia.org/api/rest_v1/page/summary/Die_%C3%84rzte")
+    #expect(ArtistWiki.summaryURL(fromQueryResult: result, languages: ["fr", "en"])?.host == "en.wikipedia.org")
+    #expect(ArtistWiki.summaryURL(fromQueryResult: result, languages: ["fr"]) == nil)
+}
+
+@Test func albumTracksBecomeLibraryRowsWithAlbumAndYear() throws {
+    let json = Data("""
+        {"name": "OK Computer", "id": "a1", "uri": "spotify:album:a1", "release_date": "1997-05-21", "album_type": "album",
+         "tracks": {"items": [{"uri": "spotify:track:t1", "name": "Airbag", "duration_ms": 284000, "track_number": 1,
+                               "artists": [{"name": "Radiohead", "id": "r1"}]}], "next": null, "total": 1}}
+        """.utf8)
+    let tracks = try JSONDecoder.spotify.decode(SpotifyAlbum.self, from: json).libraryTracks
+    #expect(tracks.count == 1)
+    #expect(tracks.first?.album == "OK Computer")
+    #expect(tracks.first?.year == 1997)
+    #expect(tracks.first?.url.absoluteString == "spotify:track:t1")
+}
+
+@Test func artistRadioStartsWithTheArtistAndLimitsSongsPerArtist() {
+    func songs(_ artist: String) -> [ArtistRadio.Recording] {
+        (1...15).map { ArtistRadio.Recording(recordingMbid: "\(artist)\($0)", recordingName: "Song \($0)", artistName: artist) }
+    }
+    var generator = SystemRandomNumberGenerator()
+    let mix = ArtistRadio.mix(seed: songs("A"), similar: [songs("B"), songs("C"), []], using: &generator)
+    #expect(mix.count == 10)
+    #expect(mix.first?.artistName == "A")
+    #expect(mix.filter { $0.artistName == "B" }.count == 3)
+    // Only each artist's ten most popular songs are picked.
+    #expect(mix.allSatisfy { Int($0.recordingName.dropFirst(5))! <= 10 })
+}

@@ -67,8 +67,7 @@ final class MainWindowView: SkinView {
     /// Advances analyzer falloff and the marquee; driven by the app's 30 fps timer.
     func animate() {
         tick += 1
-        let player = app.player
-        let fresh = player.state == .playing ? player.analyzer.bars : Array(repeating: 0, count: bars.count)
+        let fresh = app.visualizerBars ?? Array(repeating: 0, count: bars.count)
         for i in bars.indices {
             bars[i] = max(fresh[i], bars[i] - 0.06)
             peaks[i] = bars[i] >= peaks[i] ? bars[i] : max(0, peaks[i] - 0.015)
@@ -187,7 +186,7 @@ final class MainWindowView: SkinView {
             }
         }
 
-        if let info = app.trackInfo {
+        if let info = app.displayedTrackInfo {
             drawText(context, String(min(info.kbps, 999)), at: CGPoint(x: 111, y: 43), width: 15, alignRight: true)
             drawText(context, String(min(info.kHz, 99)), at: CGPoint(x: 156, y: 43), width: 10, alignRight: true)
         }

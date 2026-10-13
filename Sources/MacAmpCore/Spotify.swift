@@ -52,14 +52,39 @@ public struct SpotifyToken: Decodable, Sendable {
     public var refreshToken: String?
 }
 
+/// Widest first, as Spotify lists them.
+public struct SpotifyImage: Decodable, Sendable {
+    public var url: String
+}
+
 public struct SpotifyArtist: Decodable, Sendable {
     public var name: String
+    public var id: String?
+    public var genres: [String]?
+    public var images: [SpotifyImage]?
 }
 
 public struct SpotifyAlbum: Decodable, Sendable {
     public var name: String
+    public var id: String?
     public var uri: String?
     public var releaseDate: String?
+    /// "album", "single" or "compilation".
+    public var albumType: String?
+    public var images: [SpotifyImage]?
+    /// Only in full album objects (`GET /albums/{id}`): the first 50 tracks, without their `album`.
+    public var tracks: SpotifyPage<SpotifyTrack>?
+
+    /// The album's tracks as library rows, with album name and year filled in.
+    public var libraryTracks: [LibraryTrack] {
+        var plain = self
+        plain.tracks = nil
+        return (tracks?.items ?? []).compactMap { track in
+            var track = track
+            track.album = plain
+            return track.libraryTrack
+        }
+    }
 }
 
 public struct SpotifyTrack: Decodable, Sendable {
@@ -128,6 +153,12 @@ public struct SpotifyPlaylist: Decodable, Sendable {
     public var id: String
     public var name: String
     public var uri: String
+    public var owner: SpotifyUser?
+    public var collaborative: Bool?
+}
+
+public struct SpotifyUser: Decodable, Sendable {
+    public var id: String
 }
 
 public struct SpotifyDevices: Decodable, Sendable {
@@ -136,6 +167,39 @@ public struct SpotifyDevices: Decodable, Sendable {
 
 public struct SpotifySearchResult: Decodable, Sendable {
     public var tracks: SpotifyPage<SpotifyTrack>
+}
+
+/// Wikipedia intros for Spotify artists, found via their Spotify artist ID on Wikidata (property P1902).
+public enum ArtistWiki {
+    /// Wikidata SPARQL query for the artist's Wikipedia articles in `languages`; nil unless the ID is base-62.
+    public static func articlesQuery(spotifyArtistID id: String, languages: [String]) -> URL? {
+        func isSafe(_ text: String) -> Bool { !text.isEmpty && text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) } }
+        guard isSafe(id) else { return nil }
+        let list = languages.filter(isSafe).map { "\"\($0)\"" }.joined(separator: ",")
+        let sparql = """
+            SELECT ?article ?lang WHERE { ?item wdt:P1902 "\(id)". ?article schema:about ?item; schema:inLanguage ?lang; \
+            schema:isPartOf/wikibase:wikiGroup "wikipedia". FILTER(?lang IN (\(list))) }
+            """
+        var components = URLComponents(string: "https://query.wikidata.org/sparql")!
+        components.queryItems = [URLQueryItem(name: "query", value: sparql), URLQueryItem(name: "format", value: "json")]
+        return components.url
+    }
+
+    /// REST summary URL of the article in the first of `languages` that has one.
+    public static func summaryURL(fromQueryResult data: Data, languages: [String]) -> URL? {
+        struct Value: Decodable { var value: String }
+        struct Row: Decodable { var article: Value; var lang: Value }
+        struct Rows: Decodable { var bindings: [Row] }
+        struct Result: Decodable { var results: Rows }
+        guard let rows = try? JSONDecoder().decode(Result.self, from: data).results.bindings else { return nil }
+        for language in languages {
+            guard let article = rows.first(where: { $0.lang.value == language })?.article.value,
+                  let url = URL(string: article.replacingOccurrences(of: "/wiki/", with: "/api/rest_v1/page/summary/")),
+                  url.scheme == "https", url.host?.hasSuffix(".wikipedia.org") == true else { continue }
+            return url
+        }
+        return nil
+    }
 }
 
 public extension JSONDecoder {

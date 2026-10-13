@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// The classic playlist editor (pledit.bmp): resizable in 25×29 px steps, with shade mode.
 @MainActor
-final class PlaylistView: SkinView {
+final class PlaylistView: SkinView, NSDraggingSource {
     enum Control: Equatable {
         case close, shade
         case add, remove, select, misc, listMenu
@@ -21,6 +21,8 @@ final class PlaylistView: SkinView {
     private var selectionAnchor: Int?
     /// Row under the mouse while selected entries are dragged to a new position.
     private var dragRow: Int?
+    /// Set once dragged entries leave the window: they then go to other windows (e.g. a library playlist).
+    private var isDraggingOut = false
     private var resizeStart: (mouse: CGPoint, size: CGSize)?
 
     override var logicalSize: CGSize {
@@ -214,7 +216,8 @@ final class PlaylistView: SkinView {
         case .scrollbar:
             scroll(toThumbAt: point.y)
         case .rows:
-            guard let dragRow else { return }
+            guard let dragRow, !isDraggingOut else { return }
+            if !bounds.contains(point) { return beginDraggingOut(event, at: point) }
             let target = min(max(row(at: point), 0), max(0, app.playlist.entries.count - 1))
             self.dragRow = dragRow + app.playlist.moveSelection(by: target - dragRow)
         default:
@@ -289,6 +292,54 @@ final class PlaylistView: SkinView {
     /// Dropping on the playlist appends instead of replacing.
     override func dropped(_ urls: [URL], at point: CGPoint) {
         app.open(urls, replacing: false)
+    }
+
+    /// Entries dragged out and back in would be appended twice.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        sender.draggingSource as? PlaylistView === self ? [] : super.draggingEntered(sender)
+    }
+
+    // MARK: Dragging entries out and the row menu
+
+    private func beginDraggingOut(_ event: NSEvent, at point: CGPoint) {
+        isDraggingOut = true
+        let items = app.playlist.selection.enumerated().map { offset, index in
+            let entry = app.playlist.entries[index]
+            let item = NSDraggingItem(pasteboardWriter: entry.url as NSURL)
+            let label = NSImage(size: CGSize(width: 220, height: 14), flipped: false) { rect in
+                (entry.displayTitle as NSString).draw(in: rect, withAttributes: [.font: NSFont.systemFont(ofSize: 11),
+                                                                                .foregroundColor: NSColor.white])
+                return true
+            }
+            item.setDraggingFrame(CGRect(x: point.x, y: point.y + CGFloat(offset) * 14, width: 220, height: 14), contents: label)
+            return item
+        }
+        beginDraggingSession(with: items, event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .copy : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        isDraggingOut = false
+        pressed = nil
+        dragRow = nil
+    }
+
+    /// On a row: "Add to Playlist" and "Remove" for the clicked or selected entries; elsewhere the app menu.
+    override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        guard control(at: point) == .rows, app.playlist.entries.indices.contains(row) else { return super.rightMouseDown(with: event) }
+        if !app.playlist.selection.contains(row) { app.playlist.selection = [row] }
+        needsDisplay = true
+        let playlists = NSMenu()
+        playlists.items = app.addToPlaylistItems(for: app.playlist.selection.map { app.playlist.entries[$0].url })
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Add to Playlist", action: nil, keyEquivalent: "").submenu = playlists
+        menu.addItem(withTitle: "Remove", action: #selector(removeSelected), keyEquivalent: "").target = self
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
     // MARK: Button menus

@@ -3,7 +3,7 @@ import MacAmpCore
 
 /// The media library: a gen.bmp window frame around native lists colored like the skin's playlist.
 @MainActor
-final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+final class LibraryView: GenWindowView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     private enum SidebarItem: Hashable {
         case header(String)
         case view(Library.View)
@@ -19,9 +19,6 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
         }
     }
 
-    private enum Control { case close, resize }
-
-    private static let title = "MEDIA LIBRARY"
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
         ("position", "#", 34), ("artist", "Artist", 130), ("title", "Title", 170), ("album", "Album", 130), ("length", "Length", 50),
         ("track", "Track", 44), ("genre", "Genre", 80), ("year", "Year", 40), ("rating", "Rating", 55),
@@ -37,14 +34,13 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
     private var sidebarItems: [SidebarItem] = []
     private var selected = SidebarItem.view(.audio)
     private var rows: [LibraryTrack] = []
-    private var pressed: Control?
-    private var resizeStart: (mouse: CGPoint, size: CGSize)?
     private var didPlaceDivider = false
     /// Spotify rows per sidebar item, loaded on first selection.
     private var spotifyRows: [SidebarItem: [LibraryTrack]] = [:]
     private var spotifyTask: Task<Void, Never>?
     /// Spotify playlists whose tracks the API withholds (not owned by the user); Play starts them in Spotify.
     private var closedPlaylists: Set<String> = []
+    private let playlistsMenu = NSMenu()
 
     override init(app: AppController) {
         super.init(app: app)
@@ -53,12 +49,10 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
         libraryChanged()
     }
 
+    override var title: String { "MEDIA LIBRARY" }
     override var logicalSize: CGSize { app.librarySize }
-    override var followsDoubleSize: Bool { false }
-
-    private var contentRect: CGRect {
-        CGRect(x: 11, y: 20, width: logicalSize.width - 19, height: logicalSize.height - 34)
-    }
+    override func resize(to size: CGSize) { app.setLibrarySize(size) }
+    override func close() { app.toggleLibrary() }
 
     // MARK: Content
 
@@ -91,6 +85,8 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
         tracksTable.menu = tracksMenu()
         tracksTable.setDraggingSourceOperationMask(.copy, forLocal: false)
         sidebar.menu = sidebarMenu()
+        // Tracks dropped on a playlist in the sidebar are added to it.
+        sidebar.registerForDraggedTypes([.URL, .fileURL])
 
         // Laid out by hand: NSSplitView briefly sizes panes to zero, which breaks autoresizing masks.
         let pane = ManualLayoutView()
@@ -401,6 +397,46 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
         tableView === tracksTable ? rows[row].url as NSURL : nil
     }
 
+    func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        guard tableView === sidebar, dropOperation == .on, sidebarItems.indices.contains(row), playlistTarget(sidebarItems[row]) != nil
+        else { return [] }
+        return .copy
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
+                   dropOperation: NSTableView.DropOperation) -> Bool {
+        let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] ?? []
+        guard !urls.isEmpty, sidebarItems.indices.contains(row) else { return false }
+        add(urls, to: sidebarItems[row])
+        return true
+    }
+
+    /// The playlist a sidebar row stands for, if tracks can be dropped on it.
+    private func playlistTarget(_ item: SidebarItem) -> AppController.PlaylistTarget? {
+        switch item {
+        case .playlist(let index): .library(index)
+        case .spotifyLiked: .liked
+        case .spotifyPlaylist(let id): app.spotifyPlaylists.first { $0.id == id && app.spotify.canEdit($0) }.map { .spotify($0) }
+        default: nil
+        }
+    }
+
+    private func add(_ urls: [URL], to item: SidebarItem) {
+        if let target = playlistTarget(item) { app.add(urls, to: target) }
+    }
+
+    /// Forgets a Spotify playlist's cached rows after tracks were added, reloading it when shown.
+    func spotifyPlaylistChanged(_ id: String) {
+        spotifyRows[.spotifyPlaylist(id)] = nil
+        if selected == .spotifyPlaylist(id) { reloadRows() }
+    }
+
+    func likedSongsChanged() {
+        spotifyRows[.spotifyLiked] = nil
+        if selected == .spotifyLiked { reloadRows() }
+    }
+
     // MARK: Actions
 
     /// Rows a context-menu or button action applies to: the clicked row unless it is part of the selection.
@@ -451,16 +487,23 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
         let rate = menu.addItem(withTitle: "Rate", action: nil, keyEquivalent: "")
         rate.submenu = ratings
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Add to Playlist", action: nil, keyEquivalent: "").submenu = playlistsMenu
+        playlistsMenu.delegate = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Show in Finder", action: #selector(showInFinder), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove from Library", action: #selector(removeFromLibrary), keyEquivalent: "").target = self
-        for item in menu.items.dropFirst(2) { item.tag = Self.localOnlyTag }
+        for item in menu.items.dropFirst(2) where item.submenu !== playlistsMenu { item.tag = Self.localOnlyTag }
         return menu
     }
 
-    /// Hides the local-file actions when the clicked rows are Spotify tracks.
+    /// Hides the local-file actions when the clicked rows are Spotify tracks; fills "Add to Playlist".
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let hasFiles = targetTracks.contains { $0.url.isFileURL }
-        for item in menu.items where item.tag == Self.localOnlyTag { item.isHidden = !hasFiles }
+        guard menu === playlistsMenu else {
+            let hasFiles = targetTracks.contains { $0.url.isFileURL }
+            for item in menu.items where item.tag == Self.localOnlyTag { item.isHidden = !hasFiles }
+            return
+        }
+        menu.items = app.addToPlaylistItems(for: targetTracks.map(\.url))
     }
 
     private func sidebarMenu() -> NSMenu {
@@ -476,115 +519,6 @@ final class LibraryView: SkinView, NSTableViewDataSource, NSTableViewDelegate, N
 
     override func dropped(_ urls: [URL], at point: CGPoint) {
         app.addLibraryFolders(urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true })
-    }
-
-    // MARK: Frame (gen.bmp)
-
-    override func drawSkin(_ context: CGContext) {
-        let w = logicalSize.width, h = logicalSize.height
-        // The windows are transparent for region.txt, so the content area needs its own background.
-        context.setFillColor(skin.playlistStyle.normalBackground)
-        context.fill(contentRect)
-        let top: CGFloat = isActive ? 0 : 21
-        let titleWidth = textWidth(Self.title)
-        let titleBlock = max(25, (titleWidth / 25).rounded(.up) * 25)
-        let titleStart = (((w - titleBlock) / 2) / 25).rounded(.down) * 25
-
-        func piece(_ x: CGFloat) -> CGRect { CGRect(x: x, y: top, width: 25, height: 20) }
-        tile(context, "gen", piece(104), in: CGRect(x: 25, y: 0, width: titleStart - 50, height: 20))
-        tile(context, "gen", piece(104), in: CGRect(x: titleStart + titleBlock + 25, y: 0, width: w - titleStart - titleBlock - 50, height: 20))
-        tile(context, "gen", piece(52), in: CGRect(x: titleStart, y: 0, width: titleBlock, height: 20))
-        blit(context, "gen", piece(0), at: .zero)
-        blit(context, "gen", piece(26), at: CGPoint(x: titleStart - 25, y: 0))
-        blit(context, "gen", piece(78), at: CGPoint(x: titleStart + titleBlock, y: 0))
-        blit(context, "gen", piece(130), at: CGPoint(x: w - 25, y: 0))
-        drawTitle(context, at: CGPoint(x: titleStart + ((titleBlock - titleWidth) / 2).rounded(.down), y: 4))
-        if pressed == .close { blit(context, "gen", CGRect(x: 148, y: 42, width: 9, height: 9), at: CGPoint(x: w - 11, y: 3)) }
-
-        tile(context, "gen", CGRect(x: 127, y: 42, width: 11, height: 29), in: CGRect(x: 0, y: 20, width: 11, height: h - 58))
-        blit(context, "gen", CGRect(x: 158, y: 42, width: 11, height: 24), at: CGPoint(x: 0, y: h - 38))
-        tile(context, "gen", CGRect(x: 139, y: 42, width: 8, height: 29), in: CGRect(x: w - 8, y: 20, width: 8, height: h - 58))
-        blit(context, "gen", CGRect(x: 170, y: 42, width: 8, height: 24), at: CGPoint(x: w - 8, y: h - 38))
-
-        tile(context, "gen", CGRect(x: 127, y: 72, width: 25, height: 14), in: CGRect(x: 125, y: h - 14, width: w - 250, height: 14))
-        blit(context, "gen", CGRect(x: 0, y: 42, width: 125, height: 14), at: CGPoint(x: 0, y: h - 14))
-        blit(context, "gen", CGRect(x: 0, y: 57, width: 125, height: 14), at: CGPoint(x: w - 125, y: h - 14))
-    }
-
-    private func textWidth(_ text: String) -> CGFloat {
-        text.reduce(0) { $0 + (skin.genFont[$1]?.width ?? 4) }
-    }
-
-    private func drawTitle(_ context: CGContext, at origin: CGPoint) {
-        var x = origin.x
-        for character in Self.title {
-            guard var glyph = skin.genFont[character] else {
-                x += 4
-                continue
-            }
-            if !isActive { glyph.origin.y += 8 }
-            blit(context, "gen", glyph, at: CGPoint(x: x, y: origin.y))
-            x += glyph.width
-        }
-    }
-
-    // MARK: Mouse
-
-    private func control(at point: CGPoint) -> Control? {
-        let w = logicalSize.width, h = logicalSize.height
-        if CGRect(x: w - 11, y: 3, width: 9, height: 9).contains(point) { return .close }
-        if CGRect(x: w - 20, y: h - 14, width: 20, height: 14).contains(point) { return .resize }
-        return nil
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        guard let hit = control(at: point) else { return beginWindowDrag(event) }
-        pressed = hit
-        if hit == .resize { resizeStart = (NSEvent.mouseLocation, app.librarySize) }
-        needsDisplay = true
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        if continueWindowDrag() { return }
-        guard pressed == .resize, let start = resizeStart else { return }
-        let mouse = NSEvent.mouseLocation
-        let columns = max(0, ((start.size.width + mouse.x - start.mouse.x - 275) / 25).rounded())
-        let rows = max(0, ((start.size.height + start.mouse.y - mouse.y - 116) / 29).rounded())
-        app.setLibrarySize(CGSize(width: 275 + columns * 25, height: 116 + rows * 29))
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        if endWindowDrag() { return }
-        defer { pressed = nil; resizeStart = nil; needsDisplay = true }
-        if pressed == .close, control(at: convert(event.locationInWindow, from: nil)) == .close { app.toggleLibrary() }
-    }
-}
-
-/// A view that positions its subviews with a closure whenever its size changes.
-private final class ManualLayoutView: NSView {
-    var layoutSubviews: ((CGSize) -> Void)?
-
-    override func resizeSubviews(withOldSize oldSize: NSSize) {
-        layoutSubviews?(bounds.size)
-    }
-}
-
-/// Draws the selection in the skin's playlist selection color.
-private final class SkinRowView: NSTableRowView {
-    private let selection: NSColor
-
-    init(selection: NSColor) {
-        self.selection = selection
-        super.init(frame: .zero)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    override func drawSelection(in dirtyRect: NSRect) {
-        selection.setFill()
-        bounds.fill()
     }
 }
 

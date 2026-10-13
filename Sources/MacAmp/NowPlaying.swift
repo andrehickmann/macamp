@@ -19,8 +19,8 @@ final class NowPlaying {
     func update() {
         let player = app.player
         let center = MPNowPlayingInfoCenter.default()
-        // While Spotify plays, its own app publishes Now Playing and receives the media keys.
-        guard player.file != nil || player.streamURL != nil, !app.spotify.isActive else {
+        // While Spotify plays, its own app publishes Now Playing and receives the media keys; Sonos plays elsewhere.
+        guard player.file != nil || player.streamURL != nil, !app.spotify.isActive, !app.sonos.isActive else {
             center.nowPlayingInfo = nil
             center.playbackState = .stopped
             return

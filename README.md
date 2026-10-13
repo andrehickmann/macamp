@@ -58,15 +58,31 @@ Development options (passed as user defaults):
 - Internet radio: stream titles from ICY metadata, `.pls`/`.m3u` station links, equalizer and analyzer included
 - Media library (`gen.bmp` frame): watched folders, tag scan, search, smart views (most/recently played,
   recently added, never played, top rated), ratings, play counts, saved playlists, drag to playlist
-- Spotify (experimental; Premium and your own Spotify developer Client ID required, not configurable in the app yet): connect from the library or File menu, browse Liked Songs, playlists and
-  search; Spotify tracks join the playlist and are controlled from the main window while a Spotify app plays them
+- Spotify (experimental; Premium and your own Spotify Client ID required, see [Spotify setup](#spotify-setup)): connect from the library or File menu, browse Liked Songs, playlists and
+  search; Spotify tracks join the playlist and play in MacAmp itself (a Spotify Connect device named "MacAmp",
+  no Spotify app needed), with the spectrum analyzer fed from the system audio (macOS 14.2+, asks for permission);
+  add tracks to Liked Songs or your own Spotify playlists from the context menu in the library or playlist editor,
+  or by dragging them onto a playlist in the library sidebar
+- Sonos (`⌥R`, Rooms window): see what each room plays, group rooms, set group and room volume, and choose a room
+  as MacAmp's output; Spotify tracks and radio streams from the playlist then play on the speakers without the
+  Spotify app. For Spotify, click Connect Sonos once (Spotify must be set up in the Sonos app; start a song in
+  Spotify on your phone first so MacAmp can tell your account from others in a family plan)
+- Artist window (`⌥A`): cover, genres, Wikipedia intro, albums and an artist radio for the Spotify track that plays
 - Spectrum analyzer, media keys and Control Center "Now Playing"
 - Settings, playlist and window positions persist across launches
+
+## Spotify setup
+
+Spotify limits apps in development mode to five allowlisted users, so register your own app once:
+
+1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) (needs Premium).
+2. Redirect URI: `macamp://callback`; APIs: Web API and Web Playback SDK.
+3. In MacAmp choose File › Spotify Client ID…, paste the app's Client ID, then File › Connect Spotify….
 
 ## Keys
 
 `Z` previous · `X` play · `C` pause · `V` stop · `B` next · `L` open · `R` repeat · `S` shuffle ·
-`←/→` seek 5 s · `↑/↓` volume · `⌥G` equalizer · `⌥E` playlist · `⌥L` media library · `⌘L` open URL ·
+`←/→` seek 5 s · `↑/↓` volume · `⌥G` equalizer · `⌥E` playlist · `⌥L` media library · `⌥R` rooms · `⌥A` artist · `⌘L` open URL ·
 `⌃W` shade · `⌃D` double size
 
 In the playlist: `⌫` remove, `↩` play, `↑/↓` select, `⌘A` select all.

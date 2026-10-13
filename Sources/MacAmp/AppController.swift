@@ -14,13 +14,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     let player = Player()
     let spotify = SpotifyClient()
+    let sonos = SonosClient()
     /// The source the windows control.
-    var transport: any Transport { spotify.isActive ? spotify : player }
+    var transport: any Transport {
+        if sonos.isActive { return sonos }
+        return spotify.isActive ? spotify : player
+    }
     private(set) var spotifyPlaylists: [SpotifyPlaylist] = []
     /// Spotify tracks seen in the library, so dropped `spotify:` URLs get a title and length.
     private var spotifyTracks: [URL: LibraryTrack] = [:]
     /// Playlist index of the first track of the run handed to Spotify.
     private var spotifyRunStart = 0
+    /// Playlist index of the first track of the run queued on Sonos.
+    private var sonosRunStart = 0
     private(set) var skin: Skin!
     private var skinURL: URL?
     var playlist = Playlist() {
@@ -39,6 +45,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     var shuffle = false
     var repeatAll = false
     private(set) var trackInfo: TrackInfo?
+    /// kbps/kHz for the main window. Spotify's DRM-protected streams can't be measured, so they show Spotify's
+    /// nominal Premium quality: AAC 256 kbps in the web player, 320 kbps on Sonos. The Spotify app's quality
+    /// depends on its own settings and stays blank.
+    var displayedTrackInfo: TrackInfo? {
+        if sonos.isActive, sonos.playback?.uri?.hasPrefix("x-sonos-spotify:") == true, sonos.state != .stopped {
+            return TrackInfo(kbps: 320, kHz: 44)
+        }
+        if spotify.isActive, spotify.state != .stopped, spotify.playback?.device?.name == WebPlayer.deviceName {
+            return TrackInfo(kbps: 256, kHz: 44)
+        }
+        return trackInfo
+    }
     /// "[Connecting]" and similar while a stream or Spotify has no title yet.
     private(set) var statusMessage: String?
     private(set) var mainShade = false
@@ -47,6 +65,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private(set) var doubleSize = false
     private(set) var playlistSize = CGSize(width: 275, height: 232)
     private(set) var librarySize = CGSize(width: 550, height: 348)
+    private(set) var roomsSize = CGSize(width: 500, height: 203)
+    private(set) var artistSize = CGSize(width: 500, height: 232)
     private(set) var library = Library() {
         didSet { libraryView?.libraryChanged() }
     }
@@ -57,10 +77,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var equalizerWindow: SkinWindow!
     private var playlistWindow: SkinWindow!
     private var libraryWindow: SkinWindow!
+    private var roomsWindow: SkinWindow!
+    private var artistWindow: SkinWindow!
     private var mainView: MainWindowView!
     private var equalizerView: EqualizerView?
     private var playlistView: PlaylistView?
     private var libraryView: LibraryView?
+    private var roomsView: RoomsView?
+    private var artistView: ArtistView?
     private var nowPlaying: NowPlaying?
     private var windowDrag: (mouse: CGPoint, primary: NSWindow, origins: [(NSWindow, CGPoint)])?
     /// Per-file equalizer curves for EQ "Auto": path → [preamp] + bands.
@@ -69,11 +93,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     private var launched = false
     private var pendingFiles: [URL] = []
     private var tick = 0
+    /// `SystemAudioTap` on macOS 14.2+ (stored untyped because of its availability).
+    private var audioTap: AnyObject?
+    private var audioTapFailed = false
 
-    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow].compactMap { $0 } }
+    private var skinWindows: [SkinWindow] { [mainWindow, equalizerWindow, playlistWindow, libraryWindow, roomsWindow, artistWindow].compactMap { $0 } }
     var equalizerVisible: Bool { equalizerWindow?.isVisible ?? false }
     var playlistVisible: Bool { playlistWindow?.isVisible ?? false }
     var libraryVisible: Bool { libraryWindow?.isVisible ?? false }
+    var roomsVisible: Bool { roomsWindow?.isVisible ?? false }
+    var artistVisible: Bool { artistWindow?.isVisible ?? false }
     /// Snapshot runs must not touch the user's settings, window positions or library.
     private var isSnapshotRun: Bool { UserDefaults.standard.string(forKey: "snapshot") != nil }
     private static let supportFolder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -111,16 +140,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         self.libraryView = libraryView
         let (library, libraryRestored) = makeWindow(libraryView, name: "LibraryWindow", title: "MacAmp Library")
         libraryWindow = library
+        let roomsView = RoomsView(app: self)
+        self.roomsView = roomsView
+        let (rooms, roomsRestored) = makeWindow(roomsView, name: "RoomsWindow", title: "MacAmp Rooms")
+        roomsWindow = rooms
+        let artistView = ArtistView(app: self)
+        self.artistView = artistView
+        let (artist, artistRestored) = makeWindow(artistView, name: "ArtistWindow", title: "MacAmp Artist")
+        artistWindow = artist
         mainWindow = main
         equalizerWindow = equalizer
         playlistWindow = playlist
-        for view in [mainView, equalizerView, playlistView, libraryView] as [SkinView] { updateSize(of: view) }
+        for view in [mainView, equalizerView, playlistView, libraryView, roomsView, artistView] as [SkinView] { updateSize(of: view) }
 
         // First launch: stack equalizer and playlist below the main window, like the original.
         if !mainRestored { main.center() }
         if !equalizerRestored { equalizer.setFrameTopLeftPoint(CGPoint(x: main.frame.minX, y: main.frame.minY)) }
         if !playlistRestored { playlist.setFrameTopLeftPoint(CGPoint(x: equalizer.frame.minX, y: equalizer.frame.minY)) }
         if !libraryRestored { library.setFrameTopLeftPoint(CGPoint(x: main.frame.maxX, y: main.frame.maxY)) }
+        if !roomsRestored { rooms.setFrameTopLeftPoint(CGPoint(x: library.frame.minX, y: library.frame.minY)) }
+        if !artistRestored { artist.setFrameTopLeftPoint(CGPoint(x: rooms.frame.minX, y: rooms.frame.minY)) }
 
         main.makeKeyAndOrderFront(nil)
         main.makeFirstResponder(mainView)
@@ -128,6 +167,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         if defaults.object(forKey: "equalizerVisible") as? Bool ?? true { equalizer.orderFront(nil) }
         if defaults.object(forKey: "playlistVisible") as? Bool ?? true { playlist.orderFront(nil) }
         if defaults.bool(forKey: "libraryVisible") { library.orderFront(nil) }
+        if defaults.bool(forKey: "roomsVisible") { rooms.orderFront(nil) }
+        if defaults.bool(forKey: "artistVisible") { artist.orderFront(nil) }
+        artistView.trackChanged()
         NSApp.mainMenu = makeMainMenu()
         NSApp.activate()
 
@@ -146,6 +188,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
             self?.refreshViews()
         }
         if spotify.isConnected { loadSpotifyPlaylists() }
+        sonos.onChange = { [weak self] in
+            self?.refreshViews()
+            self?.roomsView?.roomsChanged()
+        }
+        sonos.onRunIndex = { [weak self] offset in self?.sonosRunMoved(to: offset) }
+        sonos.isWatched = roomsVisible
         player.onStreamInfo = { [weak self] info in self?.streamInfoChanged(info) }
         player.onStreamFailure = { [weak self] message in
             NSLog("MacAmp: stream failed: \(message)")
@@ -182,8 +230,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     private func animate() {
         tick += 1
+        if tick % 15 == 0 { updateVisualizerTap() }
         mainView.animate()
         if tick % 10 == 0 { playlistView?.needsDisplay = true }
+    }
+
+    /// Bars for the spectrum analyzer: the local player's, or Spotify's captured from the system while it plays here.
+    var visualizerBars: [Float]? {
+        if player.state == .playing { return player.analyzer.bars }
+        if #available(macOS 14.2, *), let tap = audioTap as? SystemAudioTap, tap.isRunning { return tap.analyzer.bars }
+        return nil
+    }
+
+    /// Runs the system audio tap only while Spotify plays and Sonos isn't the output (on another device the tap
+    /// just hears nothing). Gives up after a failure, e.g. denied permission.
+    private func updateVisualizerTap() {
+        guard #available(macOS 14.2, *) else { return }
+        let wanted = spotify.isActive && !sonos.isActive && spotify.state == .playing
+        let tap = audioTap as? SystemAudioTap
+        if wanted, tap?.isRunning != true, !audioTapFailed {
+            let tap = tap ?? SystemAudioTap()
+            audioTap = tap
+            do {
+                try tap.start()
+            } catch {
+                audioTapFailed = true
+                NSLog("MacAmp: visualizer tap unavailable: \(error.localizedDescription)")
+            }
+        } else if !wanted, let tap, tap.isRunning {
+            tap.stop()
+        }
     }
 
     // MARK: Playlist and playback
@@ -210,6 +286,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         loadInfo(for: entries)
     }
 
+    /// The `spotify:track:` URI playing in the Spotify app or on Sonos from the playlist.
+    var currentSpotifyTrack: String? {
+        if spotify.isActive { return spotify.playback?.item?.uri }
+        guard let current = playlist.current, playlist.entries.indices.contains(current),
+              playlist.entries[current].url.scheme == "spotify" else { return nil }
+        return playlist.entries[current].url.absoluteString
+    }
+
     var currentTitle: String {
         guard let current = playlist.current, playlist.entries.indices.contains(current) else { return "MacAmp" }
         return playlist.entries[current].displayTitle
@@ -217,6 +301,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     /// "1. Artist - Title (3:45)" as shown in the main window; streams show no length.
     var marqueeText: String {
+        if sonos.isActive, !sonos.isPlayingRunItem, let playback = sonos.playback, playback.state != .stopped,
+           let title = playback.displayTitle {
+            return playback.duration > 0 ? "\(title) (\(TimeDisplay.string(seconds: playback.duration)))" : title
+        }
         if spotify.isActive, !spotify.isPlayingRunItem, let item = spotify.playback?.item?.libraryTrack {
             return "\(item.displayTitle) (\(TimeDisplay.string(seconds: item.duration ?? 0)))"
         }
@@ -230,6 +318,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     }
 
     func play() {
+        if sonos.isActive {
+            return sonos.state == .paused ? sonos.resume() : playTrack(at: playlist.current ?? playlist.selection.first ?? 0)
+        }
         if spotify.isActive, spotify.state == .paused { return spotify.resume() }
         if (player.file == nil && player.streamURL == nil) || playlist.current == nil {
             playTrack(at: playlist.current ?? playlist.selection.first ?? 0)
@@ -239,11 +330,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
     }
 
     func next() {
+        if sonos.isActive, !sonos.isFollowingRun { return sonos.skip(forward: true) }
         if spotify.isActive, !spotify.isFollowingRun { return spotify.skip(forward: true) }
         if let index = playlist.index(after: playlist.current, shuffle: shuffle, repeatAll: true) { playTrack(at: index) }
     }
 
     func previous() {
+        if sonos.isActive, !sonos.isFollowingRun { return sonos.skip(forward: false) }
         if spotify.isActive, !spotify.isFollowingRun { return spotify.skip(forward: false) }
         if let index = playlist.index(before: playlist.current, repeatAll: true) { playTrack(at: index) }
     }
@@ -259,6 +352,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         playlist.current = index
         let url = playlist.entries[index].url
         statusMessage = nil
+        if sonos.isActive { return playOnSonos(at: index) }
         if url.scheme == "spotify" { return playSpotify(at: index) }
         spotify.release()
         guard url.isFileURL else { return playStream(url, at: index) }
@@ -300,6 +394,81 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
             }
             refreshViews()
         }
+    }
+
+    /// Plays the entry on the Sonos output: Spotify entries go into the group's queue (a run of them, like
+    /// `playSpotify`), radio streams play directly. Local files would need MacAmp to serve them over HTTP.
+    private func playOnSonos(at index: Int) {
+        player.stop()
+        spotify.release()
+        trackInfo = nil
+        let entry = playlist.entries[index]
+        guard !entry.url.isFileURL else {
+            statusMessage = "[Local files can't play on Sonos]"
+            return
+        }
+        if entry.url.scheme == "spotify", let offset = sonos.runOffset(of: entry.url.absoluteString), sonosRunStart + offset == index {
+            return sonos.playRunItem(at: offset)
+        }
+        statusMessage = "[Connecting to Sonos]"
+        Task {
+            do {
+                if entry.url.scheme == "spotify" {
+                    let run = playlist.entries[index...].prefix { $0.url.scheme == "spotify" }.prefix(shuffle ? 1 : 100)
+                    sonosRunStart = index
+                    try await sonos.play(spotify: run.map { ($0.url.absoluteString, $0.title) })
+                } else {
+                    try await sonos.play(radio: await Self.resolveStream(entry.url), title: entry.title)
+                }
+                statusMessage = nil
+            } catch {
+                statusMessage = "[Sonos: \(error.localizedDescription)]"
+            }
+            refreshViews()
+        }
+    }
+
+    private func sonosRunMoved(to offset: Int) {
+        let index = sonosRunStart + offset
+        guard playlist.entries.indices.contains(index), playlist.current != index else { return }
+        playlist.current = index
+        library.recordPlay(of: playlist.entries[index].url)
+    }
+
+    /// Sets up Spotify playback on Sonos with the user's account (see `SonosClient.connectSpotify`), testing on
+    /// the output group or else the first one.
+    func connectSonos() {
+        guard spotify.isConnected else {
+            roomsView?.showMessage("Connect Spotify first (File › Connect Spotify…)")
+            return
+        }
+        guard let group = sonos.outputGroup ?? sonos.groups.first else { return }
+        let spotify = spotify
+        Task {
+            do {
+                try await sonos.connectSpotify(on: group, isOwnAccountPlaying: { await spotify.isAccountPlaying() }) { account in
+                    roomsView?.showMessage("Connecting on \(group.name) (muted), account \(account)…")
+                }
+                roomsView?.showMessage("Connected – Spotify plays on Sonos with your account")
+                try? await Task.sleep(for: .seconds(6))
+                roomsView?.showMessage(nil)
+            } catch {
+                roomsView?.showMessage("Connect Sonos: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Chooses where MacAmp plays: a Sonos room (with its group) or this Mac (nil).
+    func setSonosOutput(_ room: String?) {
+        guard room != sonos.outputRoom else { return }
+        if room != nil {
+            player.stop()
+            spotify.release()
+        }
+        sonos.outputRoom = room
+        statusMessage = nil
+        refreshViews()
+        nowPlaying?.update()
     }
 
     private func spotifyRunMoved(to offset: Int) {
@@ -491,6 +660,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         if let libraryView { updateSize(of: libraryView) }
     }
 
+    func setArtistSize(_ size: CGSize) {
+        guard size != artistSize else { return }
+        artistSize = size
+        if let artistView { updateSize(of: artistView) }
+    }
+
+    @objc func toggleArtist() {
+        toggleVisibility(of: artistWindow)
+        artistView?.trackChanged()
+    }
+
+    func setRoomsSize(_ size: CGSize) {
+        guard size != roomsSize else { return }
+        roomsSize = size
+        if let roomsView { updateSize(of: roomsView) }
+    }
+
+    @objc func toggleRooms() {
+        toggleVisibility(of: roomsWindow)
+        sonos.isWatched = roomsVisible
+        if roomsVisible { roomsWindow.makeKey() }
+    }
+
     @objc func toggleLibrary() {
         toggleVisibility(of: libraryWindow)
         if libraryVisible { libraryWindow.makeKey() }
@@ -537,6 +729,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
 
     private func refreshViews() {
         for window in skinWindows { window.contentView?.needsDisplay = true }
+        artistView?.trackChanged()
     }
 
     // MARK: Media library
@@ -550,11 +743,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         tracks.map { PlaylistEntry(url: $0.url, title: $0.title == nil ? nil : $0.displayTitle, duration: $0.duration) }
     }
 
-    func playLibraryTracks(_ tracks: [LibraryTrack]) {
-        guard !tracks.isEmpty else { return }
+    func playLibraryTracks(_ tracks: [LibraryTrack], startingAt index: Int = 0) {
+        guard tracks.indices.contains(index) else { return }
         player.stop()
         playlist = Playlist(entries: entries(for: tracks))
-        playTrack(at: 0)
+        playTrack(at: index)
     }
 
     func enqueueLibraryTracks(_ tracks: [LibraryTrack]) {
@@ -611,6 +804,71 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         saveLibrary()
     }
 
+    /// Where tracks can be added: Spotify's Liked Songs, a library playlist or one of the user's Spotify playlists.
+    enum PlaylistTarget {
+        case liked
+        case library(Int)
+        case spotify(SpotifyPlaylist)
+    }
+
+    /// Targets for an "Add to Playlist" menu; Spotify targets only take Spotify tracks.
+    func playlistTargets(acceptingSpotify: Bool) -> [(title: String, target: PlaylistTarget?)] {
+        var targets: [(String, PlaylistTarget?)] = library.playlists.enumerated().map { ($1.name, .library($0)) }
+        if spotify.isConnected {
+            targets.append(("Liked Songs", acceptingSpotify ? .liked : nil))
+            targets += spotifyPlaylists.filter(spotify.canEdit).map { ($0.name, acceptingSpotify ? .spotify($0) : nil) }
+        }
+        return targets
+    }
+
+    /// "Add to Playlist" items for `urls`; disabled where a target can't take them.
+    func addToPlaylistItems(for urls: [URL]) -> [NSMenuItem] {
+        let targets = playlistTargets(acceptingSpotify: urls.contains { $0.absoluteString.hasPrefix("spotify:track:") })
+        guard !targets.isEmpty else { return [NSMenuItem(title: "No Playlists", action: nil, keyEquivalent: "")] }
+        return targets.map { title, target in
+            let item = NSMenuItem(title: title, action: target == nil ? nil : #selector(addToPlaylist(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = target.map { ($0, urls) }
+            return item
+        }
+    }
+
+    @objc private func addToPlaylist(_ sender: NSMenuItem) {
+        guard let (target, urls) = sender.representedObject as? (PlaylistTarget, [URL]) else { return }
+        add(urls, to: target)
+    }
+
+    /// Adds tracks; local files only go into library playlists.
+    func add(_ urls: [URL], to target: PlaylistTarget) {
+        if case .library(let index) = target {
+            guard library.playlists.indices.contains(index) else { return }
+            library.playlists[index].entries += expand(urls)
+            return saveLibrary()
+        }
+        let uris = urls.filter { $0.absoluteString.hasPrefix("spotify:track:") }.map(\.absoluteString)
+        let skipped = urls.count - uris.count
+        let name = if case .spotify(let playlist) = target { playlist.name } else { "Liked Songs" }
+        guard !uris.isEmpty else {
+            libraryView?.showStatus("Only Spotify tracks can be added to \(name)")
+            return
+        }
+        Task {
+            do {
+                switch target {
+                case .spotify(let playlist):
+                    try await spotify.add(uris, toPlaylist: playlist.id)
+                    libraryView?.spotifyPlaylistChanged(playlist.id)
+                default:
+                    try await spotify.like(uris)
+                    libraryView?.likedSongsChanged()
+                }
+                libraryView?.showStatus("Added \(uris.count) to \(name)" + (skipped > 0 ? " (\(skipped) local skipped)" : ""))
+            } catch {
+                libraryView?.showStatus("Spotify: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func deleteLibraryPlaylist(at index: Int) {
         guard library.playlists.indices.contains(index) else { return }
         library.playlists.remove(at: index)
@@ -654,6 +912,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
                 NSAlert(error: error).runModal()
             }
         }
+    }
+
+    @objc func setSpotifyClientID() {
+        let saved = UserDefaults.standard.string(forKey: "spotifyClientID") ?? ""
+        guard let id = askForText("Spotify Client ID",
+                                  "Create an app at developer.spotify.com (Web API and Web Playback SDK, redirect URI "
+                                  + "macamp://callback) and paste its Client ID. Leave empty to use MacAmp's default app.",
+                                  placeholder: "Default", value: saved, button: "Save", allowEmpty: true),
+              id != saved else { return }
+        guard id.isEmpty || (id.count == 32 && id.allSatisfy(\.isHexDigit)) else {
+            let alert = NSAlert()
+            alert.messageText = "Invalid Client ID"
+            alert.informativeText = "A Spotify Client ID has 32 hexadecimal characters."
+            alert.runModal()
+            return
+        }
+        if id.isEmpty { UserDefaults.standard.removeObject(forKey: "spotifyClientID") }
+        else { UserDefaults.standard.set(id, forKey: "spotifyClientID") }
+        // The refresh token belongs to the old app.
+        if spotify.isConnected { toggleSpotifyConnection() }
     }
 
     func playSpotifyPlaylist(_ uri: String) {
@@ -760,19 +1038,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         return url
     }
 
-    private func askForText(_ title: String, _ message: String, placeholder: String, button: String = "Open") -> String? {
+    private func askForText(_ title: String, _ message: String, placeholder: String, value: String = "",
+                            button: String = "Open", allowEmpty: Bool = false) -> String? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         let field = NSTextField(frame: CGRect(x: 0, y: 0, width: 320, height: 24))
         field.placeholderString = placeholder
+        field.stringValue = value
         alert.accessoryView = field
         alert.addButton(withTitle: button)
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        let value = field.stringValue.trimmingCharacters(in: .whitespaces)
-        return value.isEmpty ? nil : value
+        let text = field.stringValue.trimmingCharacters(in: .whitespaces)
+        return text.isEmpty && !allowEmpty ? nil : text
     }
 
     func addFolder() {
@@ -837,6 +1117,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         skinURL = url
         UserDefaults.standard.set(url.path, forKey: "skinPath")
         libraryView?.applySkinColors()
+        roomsView?.applySkinColors()
+        artistView?.applySkinColors()
         for window in skinWindows {
             window.contentView?.needsDisplay = true
             DispatchQueue.main.async { window.invalidateShadow() }
@@ -932,7 +1214,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
             .applicationVersion: version,
             .version: "",
             .credits: credits,
-            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "© 2026 André Hickmann · MIT License",
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "© 2026 André Hickmann Kuschnereit · MIT License",
         ])
         NSApp.activate()
     }
@@ -952,6 +1234,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         addSkinsMenu(to: fileMenu)
         fileMenu.addItem(.separator())
         addItem(to: fileMenu, "Connect Spotify…", #selector(toggleSpotifyConnection))
+        addItem(to: fileMenu, "Spotify Client ID…", #selector(setSpotifyClientID))
 
         let windowMenu = NSMenu(title: "Window")
         addWindowItems(to: windowMenu)
@@ -992,6 +1275,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         addItem(to: menu, "Equalizer", #selector(toggleEqualizer), key: "g", modifiers: .option)
         addItem(to: menu, "Playlist Editor", #selector(togglePlaylist), key: "e", modifiers: .option)
         addItem(to: menu, "Media Library", #selector(toggleLibrary), key: "l", modifiers: .option)
+        addItem(to: menu, "Rooms", #selector(toggleRooms), key: "r", modifiers: .option)
+        addItem(to: menu, "Artist", #selector(toggleArtist), key: "a", modifiers: .option)
         addItem(to: menu, "Window Shade", #selector(toggleMainShadeAction), key: "w", modifiers: .control)
         addItem(to: menu, "Double Size", #selector(toggleDoubleSize), key: "d", modifiers: .control)
     }
@@ -1010,6 +1295,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         case #selector(toggleEqualizer): equalizerVisible
         case #selector(togglePlaylist): playlistVisible
         case #selector(toggleLibrary): libraryVisible
+        case #selector(toggleRooms): roomsVisible
+        case #selector(toggleArtist): artistVisible
         case #selector(toggleMainShadeAction): mainShade
         case #selector(toggleDoubleSize): doubleSize
         default: nil
@@ -1038,6 +1325,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         }
         if let size = defaults.array(forKey: "librarySize") as? [Double], size.count == 2 {
             librarySize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
+        }
+        if let size = defaults.array(forKey: "roomsSize") as? [Double], size.count == 2 {
+            roomsSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
+        }
+        if let size = defaults.array(forKey: "artistSize") as? [Double], size.count == 2 {
+            artistSize = CGSize(width: max(275, size[0]), height: max(116, size[1]))
         }
         autoPresets = defaults.dictionary(forKey: "autoPresets") as? [String: [Float]] ?? [:]
         let decoder = JSONDecoder()
@@ -1070,6 +1363,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         defaults.set(playlistVisible, forKey: "playlistVisible")
         defaults.set(libraryVisible, forKey: "libraryVisible")
         defaults.set([librarySize.width, librarySize.height], forKey: "librarySize")
+        defaults.set(roomsVisible, forKey: "roomsVisible")
+        defaults.set([roomsSize.width, roomsSize.height], forKey: "roomsSize")
+        defaults.set(artistVisible, forKey: "artistVisible")
+        defaults.set([artistSize.width, artistSize.height], forKey: "artistSize")
         defaults.set(autoPresets, forKey: "autoPresets")
         defaults.set(try? encoder.encode(equalizer), forKey: "equalizer")
         defaults.set(try? encoder.encode(playlist.entries), forKey: "playlist")
@@ -1101,7 +1398,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuItemValidation
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
             let base = URL(fileURLWithPath: path).deletingPathExtension().path
             let views: [(String, NSView?)] = [("main", mainView), ("equalizer", equalizerView), ("playlist", playlistView),
-                                              ("library", libraryView)]
+                                              ("library", libraryView), ("rooms", roomsView), ("artist", artistView)]
             for (name, view) in views {
                 guard let view, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
                 view.cacheDisplay(in: view.bounds, to: rep)

@@ -22,11 +22,16 @@ enum SpotifyError: LocalizedError {
 /// commands. Audio plays in a Spotify app; MacAmp polls its state while it controls playback.
 @MainActor
 final class SpotifyClient: NSObject, Transport {
-    static let clientID = "c940867d6a544e8c814d558b3c491e42"
+    static let defaultClientID = "c940867d6a544e8c814d558b3c491e42"
+    /// Development-mode apps allow only 5 allowlisted users, so others register their own app and set its ID.
+    static var clientID: String { UserDefaults.standard.string(forKey: "spotifyClientID") ?? defaultClientID }
     private static let redirectURI = "macamp://callback"
     private static let scopes = [
         "user-read-playback-state", "user-modify-playback-state", "user-read-currently-playing",
         "playlist-read-private", "playlist-read-collaborative", "user-library-read",
+        // Web Playback SDK (the "MacAmp" device).
+        "streaming", "user-read-email", "user-read-private",
+        "playlist-modify-private", "playlist-modify-public", "user-library-modify",
     ]
     private static let refreshTokenAccount = "spotify-refresh-token"
     /// `-spotifyDebug YES` logs every request and polled state.
@@ -50,6 +55,9 @@ final class SpotifyClient: NSObject, Transport {
     private var pollTask: Task<Void, Never>?
     private var volumeTask: Task<Void, Never>?
     private var authSession: ASWebAuthenticationSession?
+    private let webPlayer = WebPlayer()
+    /// The logged-in user, to tell own playlists from followed ones.
+    private(set) var userID: String?
     private var run: [String] = []
     private var runProgressed = false
     private var stopped = false
@@ -152,9 +160,7 @@ final class SpotifyClient: NSObject, Transport {
 
     /// `{"context_uri": <album>, "offset": {"uri": <track>}}` for a track URI.
     private func albumContext(for trackURI: String) async throws -> [String: Any] {
-        let id = trackURI.split(separator: ":").last.map(String.init) ?? trackURI
-        let (data, _) = try await request("GET", "/tracks/\(id)")
-        guard let album = try JSONDecoder.spotify.decode(SpotifyTrack.self, from: data).album?.uri else {
+        guard let album = try await track(trackURI).album?.uri else {
             return ["uris": [trackURI]]
         }
         return ["context_uri": album, "offset": ["uri": trackURI]]
@@ -264,13 +270,16 @@ final class SpotifyClient: NSObject, Transport {
         onRunFinished?()
     }
 
-    /// The device to play on (active one, else this computer), launching Spotify if none is available.
-    /// Inactive devices are activated with a transfer first, which they otherwise silently ignore.
+    /// The device to play on: MacAmp's own web player, else the active one, else this computer (launching
+    /// Spotify if none is available). Inactive devices are activated with a transfer first, which they
+    /// otherwise silently ignore.
     private func targetDevice(forceTransfer: Bool) async throws -> String {
+        let own = await webPlayer.device(token: { [unowned self] in try await validAccessToken() })
         for attempt in 0..<10 {
             let (data, _) = try await request("GET", "/me/player/devices")
             let devices = try JSONDecoder.spotify.decode(SpotifyDevices.self, from: data).devices
-            let device = devices.first(where: \.isActive) ?? devices.first { $0.type == "Computer" } ?? devices.first
+            let device = devices.first { $0.id == own } ?? devices.first(where: \.isActive)
+                ?? devices.first { $0.type == "Computer" } ?? devices.first
             if let device, let id = device.id {
                 if !device.isActive || forceTransfer {
                     let body = try JSONSerialization.data(withJSONObject: ["device_ids": [id], "play": false])
@@ -279,7 +288,7 @@ final class SpotifyClient: NSObject, Transport {
                 }
                 return id
             }
-            if attempt == 0, let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.spotify.client") {
+            if attempt == 0, own == nil, let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.spotify.client") {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = false
                 _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: configuration)
@@ -294,12 +303,49 @@ final class SpotifyClient: NSObject, Transport {
     /// `progress` receives the tracks loaded so far and the total count after every page.
     typealias Progress = ([LibraryTrack], Int?) -> Void
 
+    /// Whether the user's account is playing right now on any device.
+    func isAccountPlaying() async -> Bool {
+        guard let (data, response) = try? await request("GET", "/me/player"), response.statusCode == 200 else { return false }
+        return (try? JSONDecoder.spotify.decode(SpotifyPlayback.self, from: data))?.isPlaying ?? false
+    }
+
     func likedSongs(progress: Progress? = nil) async throws -> [LibraryTrack] {
         try await trackPages("/me/tracks", limit: 50, progress: progress)
     }
 
     func playlists() async throws -> [SpotifyPlaylist] {
-        try await pages("/me/playlists", limit: 50, maxPages: 10, as: SpotifyPlaylist.self)
+        if userID == nil {
+            let (data, _) = try await request("GET", "/me")
+            userID = try JSONDecoder.spotify.decode(SpotifyUser.self, from: data).id
+        }
+        return try await pages("/me/playlists", limit: 50, maxPages: 10, as: SpotifyPlaylist.self)
+    }
+
+    /// Only the user's own and collaborative playlists accept new tracks.
+    func canEdit(_ playlist: SpotifyPlaylist) -> Bool {
+        playlist.collaborative == true || (userID != nil && playlist.owner?.id == userID)
+    }
+
+    /// Saves tracks (Spotify URIs) to Liked Songs. Since February 2026 the library takes URIs at `/me/library`;
+    /// older `/me/tracks` (IDs) is the fallback.
+    func like(_ uris: [String]) async throws {
+        for start in stride(from: 0, to: uris.count, by: 40) {
+            let chunk = Array(uris[start..<min(start + 40, uris.count)])
+            do {
+                _ = try await request("PUT", "/me/library", query: ["uris": chunk.joined(separator: ",")])
+            } catch SpotifyError.http(let status, _) where status == 404 || status == 405 {
+                let ids = chunk.compactMap { $0.split(separator: ":").last.map(String.init) }
+                _ = try await request("PUT", "/me/tracks", query: ["ids": ids.joined(separator: ",")])
+            }
+        }
+    }
+
+    /// Appends tracks (Spotify URIs) to a playlist, 100 per request as the API allows.
+    func add(_ uris: [String], toPlaylist id: String) async throws {
+        for start in stride(from: 0, to: uris.count, by: 100) {
+            let body = try JSONSerialization.data(withJSONObject: ["uris": Array(uris[start..<min(start + 100, uris.count)])])
+            _ = try await request("POST", "/playlists/\(id)/items", body: body)
+        }
     }
 
     func tracks(ofPlaylist id: String, progress: Progress? = nil) async throws -> [LibraryTrack] {
@@ -327,6 +373,38 @@ final class SpotifyClient: NSObject, Transport {
             if page.next == nil { break }
         }
         return tracks
+    }
+
+    func track(_ uri: String) async throws -> SpotifyTrack {
+        let id = uri.split(separator: ":").last.map(String.init) ?? uri
+        let (data, _) = try await request("GET", "/tracks/\(id)")
+        return try JSONDecoder.spotify.decode(SpotifyTrack.self, from: data)
+    }
+
+    func artist(id: String) async throws -> SpotifyArtist {
+        let (data, _) = try await request("GET", "/artists/\(id)")
+        return try JSONDecoder.spotify.decode(SpotifyArtist.self, from: data)
+    }
+
+    /// Full album including its first 50 tracks.
+    func album(id: String) async throws -> SpotifyAlbum {
+        let (data, _) = try await request("GET", "/albums/\(id)")
+        return try JSONDecoder.spotify.decode(SpotifyAlbum.self, from: data)
+    }
+
+    // ponytail: first 50 albums and singles only; follow `next` if artists with more matter.
+    /// Albums and singles, newest first as Spotify lists them; up to 50 in pages of 10 (larger limits are
+    /// rejected with "Invalid limit" since the February 2026 API changes).
+    func albums(ofArtist id: String) async throws -> [SpotifyAlbum] {
+        var albums: [SpotifyAlbum] = []
+        for offset in stride(from: 0, to: 50, by: 10) {
+            let (data, _) = try await request("GET", "/artists/\(id)/albums",
+                                              query: ["include_groups": "album,single", "limit": "10", "offset": String(offset)])
+            let page = try JSONDecoder.spotify.decode(SpotifyPage<SpotifyAlbum>.self, from: data)
+            albums += page.items
+            if page.next == nil { break }
+        }
+        return albums
     }
 
     // ponytail: fixed page caps (1,000 liked songs / 2,000 playlist tracks); follow `next` fully if users hit them.
@@ -364,11 +442,13 @@ final class SpotifyClient: NSObject, Transport {
         guard let code = SpotifyAuth.code(fromCallback: callback, expectedState: state) else { throw SpotifyError.loginFailed }
         try await token(["grant_type": "authorization_code", "code": code, "redirect_uri": Self.redirectURI,
                          "code_verifier": verifier])
+        webPlayer.reset()
     }
 
     func disconnect() {
         release()
         Keychain.delete(Self.refreshTokenAccount)
+        webPlayer.reset()
         accessToken = nil
         deviceID = nil
         onChange?()
